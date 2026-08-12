@@ -5,18 +5,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Hand Frame Effect</title>
 <style>
-  html, body { margin:0; padding:0; background:#000; overflow:hidden; height:100%; font-family: -apple-system, system-ui, sans-serif; }
+  html, body { margin:0; padding:0; background:#000; overflow:hidden; height:100%;
+    font-family: -apple-system, system-ui, sans-serif; }
   #stage { position:relative; width:100vw; height:100vh; }
-  video { display:none; } /* pixels only, never shown directly — canvas is what's drawn to screen */
+  video { display:none; }
   canvas {
     position:absolute; top:0; left:0; width:100%; height:100%;
-    object-fit:cover; transform: scaleX(-1); /* mirror selfie view */
+    object-fit:cover; transform: scaleX(-1);
   }
   #hud {
     position:absolute; top:14px; left:14px; z-index:5;
     color:#7CFF9E; background:rgba(0,0,0,0.55); border:1px solid rgba(124,255,158,0.4);
     padding:6px 12px; border-radius:8px; font-size:13px; letter-spacing:0.02em;
     pointer-events:none; white-space:nowrap;
+  }
+  #toolbar { position:absolute; top:14px; right:14px; z-index:6; display:flex; gap:8px; }
+  #toolbar button {
+    background:rgba(0,0,0,0.55); color:#7CFF9E; border:1px solid rgba(124,255,158,0.4);
+    border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600;
+  }
+  .sheet {
+    position:fixed; left:0; right:0; bottom:0; max-height:48vh; overflow-y:auto;
+    background:rgba(9,13,11,0.92); backdrop-filter: blur(12px);
+    border-top:1px solid rgba(124,255,158,0.35); border-radius:18px 18px 0 0;
+    padding:10px 18px calc(20px + env(safe-area-inset-bottom));
+    transform:translateY(105%); transition: transform .25s ease; z-index:10;
+    box-sizing:border-box;
+  }
+  .sheet.open { transform:translateY(0); }
+  .sheet-handle { width:36px; height:4px; border-radius:2px; background:rgba(124,255,158,0.4); margin:8px auto 14px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; color:#CDEFD9; font-size:14px; }
+  .row > label:first-child { flex-shrink:0; opacity:0.85; }
+  .row select { flex:1; max-width:170px; }
+  .row input[type=range] { flex:1; accent-color:#46FF82; }
+  select {
+    background:rgba(255,255,255,0.08); color:#EAFFF1; border:1px solid rgba(124,255,158,0.3);
+    border-radius:6px; padding:5px 8px; font-size:13px;
+  }
+  input[type=color] { width:44px; height:28px; border:none; background:none; padding:0; border-radius:6px; }
+  input[type=checkbox] { accent-color:#46FF82; width:16px; height:16px; }
+  .toggles { flex-direction:column; align-items:flex-start; gap:10px; }
+  .toggles label { display:flex; align-items:center; gap:8px; }
+  #resetBtn {
+    width:100%; background:rgba(255,255,255,0.06); color:#7CFF9E;
+    border:1px solid rgba(124,255,158,0.35); border-radius:8px; padding:9px; font-size:13px; margin-top:2px;
+  }
+  #dataOut {
+    color:#7CFF9E; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:11px; line-height:1.55; white-space:pre; margin:0;
   }
 </style>
 </head>
@@ -25,6 +61,64 @@
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
   <div id="hud">loading hand tracking…</div>
+
+  <div id="toolbar">
+    <button id="styleToggle">⚙ Style</button>
+    <button id="dataToggle">{ } Data</button>
+  </div>
+
+  <div id="stylePanel" class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="row">
+      <label>Frame color</label>
+      <input type="color" id="frameColor" value="#46ff82">
+    </div>
+    <div class="row">
+      <label>Effect</label>
+      <select id="effectStyle">
+        <option value="invert">Invert + tint</option>
+        <option value="solid">Solid fill</option>
+        <option value="cycle">Color cycle</option>
+        <option value="outline">Outline only</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Blend mode</label>
+      <select id="blendMode">
+        <option value="multiply">Multiply</option>
+        <option value="screen">Screen</option>
+        <option value="overlay">Overlay</option>
+        <option value="difference">Difference</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Pixelation <span id="blockResVal">64</span></label>
+      <input type="range" id="blockRes" min="8" max="160" value="64">
+    </div>
+    <div class="row">
+      <label>Opacity <span id="opacityVal">0.85</span></label>
+      <input type="range" id="opacity" min="10" max="100" value="85">
+    </div>
+    <div class="row">
+      <label>Skeleton color</label>
+      <select id="skeletonMode">
+        <option value="two-tone">Two-tone</option>
+        <option value="match">Match frame</option>
+        <option value="rainbow">Rainbow</option>
+      </select>
+    </div>
+    <div class="row toggles">
+      <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
+      <label><input type="checkbox" id="showOutline" checked> Show frame outline</label>
+      <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
+    </div>
+    <button id="resetBtn">Reset to defaults</button>
+  </div>
+
+  <div id="dataPanel" class="sheet">
+    <div class="sheet-handle"></div>
+    <pre id="dataOut">waiting for hands…</pre>
+  </div>
 </div>
 
 <script type="module">
@@ -34,13 +128,8 @@ const video  = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 const hud    = document.getElementById('hud');
+const dataOut = document.getElementById('dataOut');
 
-// --- tweakable knobs ---
-const PIXEL_BLOCKS = 64;      // lower = chunkier/blockier mask edges
-const INVERT_STRENGTH = 1;    // 0-1, css invert() amount
-const TINT = 'rgba(70,255,130,0.85)'; // green tint multiplied over the inverted region
-
-// Standard 21-point MediaPipe hand connections
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
   [0,5],[5,6],[6,7],[7,8],
@@ -50,10 +139,38 @@ const HAND_CONNECTIONS = [
   [0,17]
 ];
 const TIP_IDX = [4, 8, 12, 16, 20];
-const HAND_COLORS = ['#4AFFA0', '#FFD24A']; // hand 0, hand 1
+const HAND_COLORS = ['#46FF82', '#FFD24A'];
+const LANDMARK_NAMES = [
+  'wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+  'index_mcp','index_pip','index_dip','index_tip',
+  'middle_mcp','middle_pip','middle_dip','middle_tip',
+  'ring_mcp','ring_pip','ring_dip','ring_tip',
+  'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'
+];
+
+const DEFAULTS = {
+  frameColor: '#46ff82',
+  effectStyle: 'invert',
+  blendMode: 'multiply',
+  blockRes: 64,
+  opacity: 0.85,
+  skeletonMode: 'two-tone',
+  showSkeleton: true,
+  showOutline: true,
+  mirror: true
+};
+const settings = { ...DEFAULTS };
 
 let handLandmarker;
 let fxCanvas, fxCtx, maskLow, maskCtx;
+
+function hexToRgba(hex, a) {
+  const v = hex.replace('#', '');
+  const r = parseInt(v.substring(0, 2), 16);
+  const g = parseInt(v.substring(2, 4), 16);
+  const b = parseInt(v.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
 
 async function init() {
   const vision = await FilesetResolver.forVisionTasks(
@@ -79,28 +196,39 @@ async function init() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
 
-  // reusable offscreen buffers, sized once
   fxCanvas = document.createElement('canvas');
   fxCanvas.width = canvas.width;
   fxCanvas.height = canvas.height;
   fxCtx = fxCanvas.getContext('2d');
 
-  const lowW = PIXEL_BLOCKS;
-  const lowH = Math.max(1, Math.round(lowW * canvas.height / canvas.width));
   maskLow = document.createElement('canvas');
-  maskLow.width = lowW;
-  maskLow.height = lowH;
   maskCtx = maskLow.getContext('2d');
+  resizeMask();
 
+  bindControls();
   requestAnimationFrame(loop);
 }
 
-let lastTime = -1;
-function loop() {
-  if (video.readyState >= 2 && video.currentTime !== lastTime) {
-    lastTime = video.currentTime;
-    const now = performance.now();
-    const handRes = handLandmarker.detectForVideo(video, now);
+function resizeMask() {
+  const lowW = settings.blockRes;
+  const lowH = Math.max(1, Math.round(lowW * canvas.height / canvas.width));
+  maskLow.width = lowW;
+  maskLow.height = lowH;
+}
+
+let lastVideoTime = -1;
+let lastRafTs = performance.now();
+let fps = 0;
+
+function loop(ts) {
+  const dt = ts - lastRafTs;
+  lastRafTs = ts;
+  const instFps = dt > 0 ? 1000 / dt : 0;
+  fps = fps ? fps * 0.9 + instFps * 0.1 : instFps;
+
+  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const handRes = handLandmarker.detectForVideo(video, ts);
     render(handRes);
   }
   requestAnimationFrame(loop);
@@ -110,7 +238,6 @@ function toPx(lm) {
   return { x: lm.x * canvas.width, y: lm.y * canvas.height };
 }
 
-// Monotone chain convex hull
 function convexHull(points) {
   const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
   const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
@@ -127,6 +254,24 @@ function convexHull(points) {
   }
   upper.pop(); lower.pop();
   return lower.concat(upper);
+}
+
+function polygonArea(pts) {
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  return Math.abs(area / 2);
+}
+
+function skeletonColorFor(i) {
+  if (settings.skeletonMode === 'match') return settings.frameColor;
+  if (settings.skeletonMode === 'rainbow') {
+    const hue = (i * 137 + performance.now() / 20) % 360;
+    return `hsl(${hue}, 90%, 60%)`;
+  }
+  return HAND_COLORS[i % HAND_COLORS.length];
 }
 
 function drawHand(pts, color, highlightFrame) {
@@ -151,7 +296,6 @@ function drawHand(pts, color, highlightFrame) {
     ctx.stroke();
   }
 
-  // ring the thumb tip (4) + index tip (8) — these define the frame shape
   if (highlightFrame) {
     for (const i of [4, 8]) {
       ctx.beginPath();
@@ -176,60 +320,153 @@ function buildLowResMask(hull) {
   maskCtx.fill();
 }
 
-function drawInvertedGreenMask(hull) {
-  buildLowResMask(hull);
+function drawFrameEffect(hull) {
+  const tintRgba = hexToRgba(settings.frameColor, settings.opacity);
 
-  fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
-  fxCtx.filter = `invert(${INVERT_STRENGTH}) saturate(1.4)`;
-  fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
-  fxCtx.filter = 'none';
+  if (settings.effectStyle !== 'outline') {
+    buildLowResMask(hull);
+    fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
 
-  fxCtx.globalCompositeOperation = 'multiply';
-  fxCtx.fillStyle = TINT;
-  fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+    if (settings.effectStyle === 'invert') {
+      fxCtx.filter = 'invert(1) saturate(1.4)';
+      fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
+      fxCtx.filter = 'none';
+      fxCtx.globalCompositeOperation = settings.blendMode;
+      fxCtx.fillStyle = tintRgba;
+      fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+    } else if (settings.effectStyle === 'solid') {
+      fxCtx.globalCompositeOperation = 'source-over';
+      fxCtx.fillStyle = tintRgba;
+      fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+    } else if (settings.effectStyle === 'cycle') {
+      const hue = (performance.now() / 15) % 360;
+      fxCtx.filter = `invert(1) hue-rotate(${hue}deg) saturate(2)`;
+      fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
+      fxCtx.filter = 'none';
+      fxCtx.globalCompositeOperation = settings.blendMode;
+      fxCtx.fillStyle = hexToRgba(settings.frameColor, settings.opacity * 0.6);
+      fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+    }
 
-  fxCtx.globalCompositeOperation = 'destination-in';
-  fxCtx.imageSmoothingEnabled = false; // nearest-neighbor upscale = blocky pixelated edge
-  fxCtx.drawImage(maskLow, 0, 0, fxCanvas.width, fxCanvas.height);
-  fxCtx.globalCompositeOperation = 'source-over';
+    fxCtx.globalCompositeOperation = 'destination-in';
+    fxCtx.imageSmoothingEnabled = false;
+    fxCtx.drawImage(maskLow, 0, 0, fxCanvas.width, fxCanvas.height);
+    fxCtx.globalCompositeOperation = 'source-over';
 
-  ctx.drawImage(fxCanvas, 0, 0);
+    ctx.drawImage(fxCanvas, 0, 0);
+  }
 
-  // subtle outline of the frame shape
-  ctx.beginPath();
-  ctx.moveTo(hull[0].x, hull[0].y);
-  for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
-  ctx.closePath();
-  ctx.strokeStyle = 'rgba(124,255,158,0.4)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  if (settings.showOutline || settings.effectStyle === 'outline') {
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+    const isOutlineMode = settings.effectStyle === 'outline';
+    ctx.strokeStyle = hexToRgba(settings.frameColor, isOutlineMode ? Math.max(settings.opacity, 0.6) : 0.4);
+    ctx.lineWidth = isOutlineMode ? 4 : 2;
+    ctx.stroke();
+  }
+}
+
+let dataFrameCounter = 0;
+function updateDataPanel(hands, handedness, hull) {
+  dataFrameCounter++;
+  if (dataFrameCounter % 5 !== 0) return;
+  if (!document.getElementById('dataPanel').classList.contains('open')) return;
+
+  let out = `fps        ${fps.toFixed(1)}\nhands      ${hands.length}\n`;
+  if (hull) out += `frame area ${polygonArea(hull).toFixed(0)} px\xB2\n`;
+  out += `\n`;
+
+  hands.forEach((h, i) => {
+    const hd = handedness?.[i]?.[0];
+    out += `-- hand ${i}${hd ? `  ${hd.categoryName} ${(hd.score * 100).toFixed(0)}%` : ''} --\n`;
+    h.forEach((lm, j) => {
+      out += `${LANDMARK_NAMES[j].padEnd(11)} x:${lm.x.toFixed(3)} y:${lm.y.toFixed(3)} z:${lm.z.toFixed(3)}\n`;
+    });
+    out += `\n`;
+  });
+
+  dataOut.textContent = out.trimEnd();
 }
 
 function render(handRes) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height); // real camera, unaltered base
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   const hands = handRes.landmarks || [];
+  const handedness = handRes.handedness || handRes.handednesses || [];
   const twoHands = hands.length >= 2;
+  let hull = null;
 
   if (twoHands) {
     const pts = [];
-    for (const h of hands.slice(0, 2)) {
-      pts.push(toPx(h[4]), toPx(h[8]));
+    for (const h of hands.slice(0, 2)) pts.push(toPx(h[4]), toPx(h[8]));
+    const computedHull = convexHull(pts);
+    if (computedHull.length >= 3) {
+      hull = computedHull;
+      drawFrameEffect(hull);
     }
-    const hull = convexHull(pts);
-    if (hull.length >= 3) drawInvertedGreenMask(hull);
   }
 
-  // hand skeletons drawn on top so they're always visible, even over the effect
-  hands.forEach((h, i) => {
-    const pts = h.map(toPx);
-    drawHand(pts, HAND_COLORS[i % HAND_COLORS.length], twoHands);
-  });
+  if (settings.showSkeleton) {
+    hands.forEach((h, i) => {
+      const pts = h.map(toPx);
+      drawHand(pts, skeletonColorFor(i), twoHands);
+    });
+  }
 
   hud.textContent = hands.length === 0
     ? "show your hands to the camera"
     : `${hands.length} hand${hands.length > 1 ? 's' : ''} tracked` + (twoHands ? " · frame effect active" : " · bring both hands in for the effect");
+
+  updateDataPanel(hands, handedness, hull);
+}
+
+function bindControls() {
+  const $ = id => document.getElementById(id);
+  const stylePanel = $('stylePanel');
+  const dataPanel = $('dataPanel');
+
+  $('styleToggle').onclick = () => { dataPanel.classList.remove('open'); stylePanel.classList.toggle('open'); };
+  $('dataToggle').onclick = () => { stylePanel.classList.remove('open'); dataPanel.classList.toggle('open'); };
+
+  $('frameColor').addEventListener('input', e => settings.frameColor = e.target.value);
+  $('effectStyle').addEventListener('change', e => settings.effectStyle = e.target.value);
+  $('blendMode').addEventListener('change', e => settings.blendMode = e.target.value);
+  $('blockRes').addEventListener('input', e => {
+    settings.blockRes = parseInt(e.target.value, 10);
+    $('blockResVal').textContent = settings.blockRes;
+    resizeMask();
+  });
+  $('opacity').addEventListener('input', e => {
+    settings.opacity = parseInt(e.target.value, 10) / 100;
+    $('opacityVal').textContent = settings.opacity.toFixed(2);
+  });
+  $('skeletonMode').addEventListener('change', e => settings.skeletonMode = e.target.value);
+  $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
+  $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
+  $('mirrorToggle').addEventListener('change', e => {
+    settings.mirror = e.target.checked;
+    canvas.style.transform = settings.mirror ? 'scaleX(-1)' : 'none';
+  });
+
+  $('resetBtn').addEventListener('click', () => {
+    Object.assign(settings, DEFAULTS);
+    $('frameColor').value = settings.frameColor;
+    $('effectStyle').value = settings.effectStyle;
+    $('blendMode').value = settings.blendMode;
+    $('blockRes').value = settings.blockRes;
+    $('blockResVal').textContent = settings.blockRes;
+    $('opacity').value = settings.opacity * 100;
+    $('opacityVal').textContent = settings.opacity.toFixed(2);
+    $('skeletonMode').value = settings.skeletonMode;
+    $('showSkeleton').checked = true;
+    $('showOutline').checked = true;
+    $('mirrorToggle').checked = true;
+    canvas.style.transform = 'scaleX(-1)';
+    resizeMask();
+  });
 }
 
 init().catch(err => {
