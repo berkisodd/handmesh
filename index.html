@@ -3,41 +3,57 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Hand Frame Mesh</title>
+<title>Hand Frame Effect</title>
 <style>
   html, body { margin:0; padding:0; background:#000; overflow:hidden; height:100%; font-family: -apple-system, system-ui, sans-serif; }
   #stage { position:relative; width:100vw; height:100vh; }
-  video, canvas {
+  video { display:none; } /* pixels only, never shown directly — canvas is what's drawn to screen */
+  canvas {
     position:absolute; top:0; left:0; width:100%; height:100%;
-    object-fit:cover; transform: scaleX(-1);
+    object-fit:cover; transform: scaleX(-1); /* mirror selfie view */
   }
-  video { visibility:hidden; } /* we only need its pixels, not to see it doubled under canvas */
   #hud {
     position:absolute; top:14px; left:14px; z-index:5;
     color:#7CFF9E; background:rgba(0,0,0,0.55); border:1px solid rgba(124,255,158,0.4);
     padding:6px 12px; border-radius:8px; font-size:13px; letter-spacing:0.02em;
-    pointer-events:none;
+    pointer-events:none; white-space:nowrap;
   }
-  #hud.hide { display:none; }
 </style>
 </head>
 <body>
 <div id="stage">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div id="hud">loading models…</div>
+  <div id="hud">loading hand tracking…</div>
 </div>
 
 <script type="module">
-import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
-import { Delaunay } from "https://cdn.jsdelivr.net/npm/d3-delaunay@6/+esm";
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
 
 const video  = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 const hud    = document.getElementById('hud');
 
-let handLandmarker, faceLandmarker;
+// --- tweakable knobs ---
+const PIXEL_BLOCKS = 64;      // lower = chunkier/blockier mask edges
+const INVERT_STRENGTH = 1;    // 0-1, css invert() amount
+const TINT = 'rgba(70,255,130,0.85)'; // green tint multiplied over the inverted region
+
+// Standard 21-point MediaPipe hand connections
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+const TIP_IDX = [4, 8, 12, 16, 20];
+const HAND_COLORS = ['#4AFFA0', '#FFD24A']; // hand 0, hand 1
+
+let handLandmarker;
+let fxCanvas, fxCtx, maskLow, maskCtx;
 
 async function init() {
   const vision = await FilesetResolver.forVisionTasks(
@@ -52,14 +68,6 @@ async function init() {
     runningMode: "VIDEO"
   });
 
-  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-    },
-    numFaces: 1,
-    runningMode: "VIDEO"
-  });
-
   hud.textContent = "requesting camera…";
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }
@@ -71,8 +79,18 @@ async function init() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
 
-  hud.textContent = "make a frame with both hands \u2192";
-  setTimeout(() => hud.classList.add('hide'), 4000);
+  // reusable offscreen buffers, sized once
+  fxCanvas = document.createElement('canvas');
+  fxCanvas.width = canvas.width;
+  fxCanvas.height = canvas.height;
+  fxCtx = fxCanvas.getContext('2d');
+
+  const lowW = PIXEL_BLOCKS;
+  const lowH = Math.max(1, Math.round(lowW * canvas.height / canvas.width));
+  maskLow = document.createElement('canvas');
+  maskLow.width = lowW;
+  maskLow.height = lowH;
+  maskCtx = maskLow.getContext('2d');
 
   requestAnimationFrame(loop);
 }
@@ -83,8 +101,7 @@ function loop() {
     lastTime = video.currentTime;
     const now = performance.now();
     const handRes = handLandmarker.detectForVideo(video, now);
-    const faceRes = faceLandmarker.detectForVideo(video, now);
-    render(handRes, faceRes);
+    render(handRes);
   }
   requestAnimationFrame(loop);
 }
@@ -112,61 +129,110 @@ function convexHull(points) {
   return lower.concat(upper);
 }
 
-function render(handRes, faceRes) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const hasHands = handRes.landmarks && handRes.landmarks.length >= 2;
-  const hasFace  = faceRes.faceLandmarks && faceRes.faceLandmarks.length > 0;
-  if (!hasHands || !hasFace) return;
-
-  // Frame corners: thumb tip (4) + index tip (8) from each detected hand
-  const pts = [];
-  for (const hand of handRes.landmarks.slice(0, 2)) {
-    pts.push(toPx(hand[4]));
-    pts.push(toPx(hand[8]));
-  }
-  const hull = convexHull(pts);
-  if (hull.length < 3) return;
-
-  ctx.save();
+function drawHand(pts, color, highlightFrame) {
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
   ctx.beginPath();
-  ctx.moveTo(hull[0].x, hull[0].y);
-  for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
-  ctx.closePath();
-  ctx.clip();
+  for (const [a, b] of HAND_CONNECTIONS) {
+    ctx.moveTo(pts[a].x, pts[a].y);
+    ctx.lineTo(pts[b].x, pts[b].y);
+  }
+  ctx.stroke();
 
-  // Green triangulated face mesh, clipped to the hand frame
-  const face = faceRes.faceLandmarks[0].map(toPx);
-  const delaunay = Delaunay.from(face, d => d.x, d => d.y);
-  const tris = delaunay.triangles;
-
-  ctx.lineWidth = 1;
-  ctx.fillStyle = "rgba(50, 230, 100, 0.55)";
-  ctx.strokeStyle = "rgba(10, 70, 25, 0.85)";
-  for (let i = 0; i < tris.length; i += 3) {
-    const a = face[tris[i]], b = face[tris[i + 1]], c = face[tris[i + 2]];
+  for (let i = 0; i < pts.length; i++) {
+    const isTip = TIP_IDX.includes(i);
+    const r = isTip ? 6 : 3.5;
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.lineTo(c.x, c.y);
-    ctx.closePath();
+    ctx.arc(pts[i].x, pts[i].y, r, 0, Math.PI * 2);
+    ctx.fillStyle = isTip ? '#ffffff' : color;
     ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = color;
     ctx.stroke();
   }
-  ctx.restore();
 
-  // Faint frame outline
+  // ring the thumb tip (4) + index tip (8) — these define the frame shape
+  if (highlightFrame) {
+    for (const i of [4, 8]) {
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, 10, 0, Math.PI * 2);
+      ctx.strokeStyle = '#FFEE55';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+}
+
+function buildLowResMask(hull) {
+  const { width: lw, height: lh } = maskLow;
+  maskCtx.clearRect(0, 0, lw, lh);
+  maskCtx.fillStyle = '#fff';
+  maskCtx.beginPath();
+  maskCtx.moveTo(hull[0].x / canvas.width * lw, hull[0].y / canvas.height * lh);
+  for (let i = 1; i < hull.length; i++) {
+    maskCtx.lineTo(hull[i].x / canvas.width * lw, hull[i].y / canvas.height * lh);
+  }
+  maskCtx.closePath();
+  maskCtx.fill();
+}
+
+function drawInvertedGreenMask(hull) {
+  buildLowResMask(hull);
+
+  fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.filter = `invert(${INVERT_STRENGTH}) saturate(1.4)`;
+  fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.filter = 'none';
+
+  fxCtx.globalCompositeOperation = 'multiply';
+  fxCtx.fillStyle = TINT;
+  fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+
+  fxCtx.globalCompositeOperation = 'destination-in';
+  fxCtx.imageSmoothingEnabled = false; // nearest-neighbor upscale = blocky pixelated edge
+  fxCtx.drawImage(maskLow, 0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.globalCompositeOperation = 'source-over';
+
+  ctx.drawImage(fxCanvas, 0, 0);
+
+  // subtle outline of the frame shape
   ctx.beginPath();
   ctx.moveTo(hull[0].x, hull[0].y);
   for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
   ctx.closePath();
-  ctx.strokeStyle = "rgba(124,255,158,0.35)";
+  ctx.strokeStyle = 'rgba(124,255,158,0.4)';
   ctx.lineWidth = 2;
   ctx.stroke();
 }
 
+function render(handRes) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height); // real camera, unaltered base
+
+  const hands = handRes.landmarks || [];
+  const twoHands = hands.length >= 2;
+
+  if (twoHands) {
+    const pts = [];
+    for (const h of hands.slice(0, 2)) {
+      pts.push(toPx(h[4]), toPx(h[8]));
+    }
+    const hull = convexHull(pts);
+    if (hull.length >= 3) drawInvertedGreenMask(hull);
+  }
+
+  // hand skeletons drawn on top so they're always visible, even over the effect
+  hands.forEach((h, i) => {
+    const pts = h.map(toPx);
+    drawHand(pts, HAND_COLORS[i % HAND_COLORS.length], twoHands);
+  });
+
+  hud.textContent = hands.length === 0
+    ? "show your hands to the camera"
+    : `${hands.length} hand${hands.length > 1 ? 's' : ''} tracked` + (twoHands ? " · frame effect active" : " · bring both hands in for the effect");
+}
+
 init().catch(err => {
-  hud.classList.remove('hide');
   hud.textContent = "error: " + err.message;
   console.error(err);
 });
