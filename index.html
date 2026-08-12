@@ -123,6 +123,59 @@
     position:absolute; top:6px; right:8px; background:none; border:none; color:#7CFF9E;
     font-size:20px; line-height:1; padding:6px; -webkit-tap-highlight-color:transparent;
   }
+
+  /* ---------------- onboarding walkthrough ---------------- */
+  .onboard-overlay {
+    position:fixed; inset:0; z-index:50; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px);
+    display:flex; align-items:center; justify-content:center;
+    opacity:0; pointer-events:none; transition:opacity .25s ease;
+  }
+  .onboard-overlay.show { opacity:1; pointer-events:auto; }
+  .onboard-card {
+    position:relative; width:min(340px, calc(100vw - 48px));
+    background:rgba(9,13,11,0.97); border:1px solid rgba(124,255,158,0.35); border-radius:18px;
+    padding:22px 22px 20px; box-sizing:border-box; box-shadow:0 20px 50px rgba(0,0,0,0.5);
+  }
+  .onboard-skip {
+    position:absolute; top:12px; right:14px; background:none; border:none;
+    color:#7CFF9E; font-size:13px; opacity:0.75; padding:4px; -webkit-tap-highlight-color:transparent;
+  }
+  .ob-visual-wrap { height:110px; display:flex; align-items:center; justify-content:center; position:relative; perspective:400px; }
+  .ob-visual { position:absolute; display:none; align-items:center; justify-content:center; width:100%; height:100%; }
+  .ob-visual.active { display:flex; }
+  #onboardTitle { color:#EAFFF1; font-size:17px; font-weight:700; margin:10px 0 6px; text-align:center; }
+  #onboardDesc { color:#CDEFD9; font-size:13.5px; line-height:1.5; text-align:center; margin:0; }
+  .onboard-dots { display:flex; gap:6px; justify-content:center; margin:16px 0; }
+  .onboard-dots span { width:6px; height:6px; border-radius:50%; background:rgba(124,255,158,0.25); }
+  .onboard-dots span.active { background:#46FF82; }
+  .onboard-actions { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .onboard-actions button {
+    flex:1; padding:11px; border-radius:10px; font-size:14px; font-weight:600;
+    border:1px solid rgba(124,255,158,0.35); background:rgba(255,255,255,0.06); color:#7CFF9E;
+  }
+  #onboardNext { background:#46FF82; color:#06210F; border:none; }
+  #onboardBack:disabled { visibility:hidden; }
+
+  .ob-corner { fill:none; stroke:#46FF82; stroke-width:4; stroke-linecap:round; animation: obPulse 1.8s ease-in-out infinite; }
+  @keyframes obPulse { 0%,100% { opacity:0.4; stroke-width:3; } 50% { opacity:1; stroke-width:5; } }
+
+  .ob-joint { fill:#FFD24A; animation: obJointPulse 1.6s ease-in-out infinite; }
+  @keyframes obJointPulse { 0%,100% { opacity:0.35; } 50% { opacity:1; } }
+
+  .ob-record-demo { width:56px; height:56px; border-radius:50%; border:4px solid rgba(255,255,255,0.85);
+    display:flex; align-items:center; justify-content:center; }
+  .ob-record-dot { width:40px; height:40px; border-radius:50%; background:#FF3B30; animation:obRecPulse 1.4s ease-in-out infinite; }
+  @keyframes obRecPulse { 0%,100% { transform:scale(0.85); opacity:0.85; } 50% { transform:scale(1); opacity:1; } }
+
+  .ob-cube-spin { animation: obCubeSpin 4s linear infinite; }
+  @keyframes obCubeSpin { from { transform:rotateY(0); } to { transform:rotateY(360deg); } }
+
+  .ob-btn-pair { display:flex; gap:14px; }
+  .ob-mini-btn { padding:8px 12px; border:1px solid rgba(124,255,158,0.4); border-radius:8px;
+    color:#7CFF9E; font-size:13px; font-weight:600; background:rgba(0,0,0,0.3); }
+  .ob-mini-1 { animation: obBounce 1.6s ease-in-out infinite; }
+  .ob-mini-2 { animation: obBounce 1.6s ease-in-out infinite; animation-delay:0.3s; }
+  @keyframes obBounce { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
 </style>
 </head>
 <body>
@@ -137,6 +190,7 @@
   </div>
 
   <div id="toolbar">
+    <button id="helpBtn">?</button>
     <button id="styleToggle">⚙ Style</button>
     <button id="dataToggle">{ } Data</button>
   </div>
@@ -233,6 +287,63 @@
   <div id="dataPanel" class="sheet">
     <div class="sheet-handle"></div>
     <pre id="dataOut">waiting for hands…</pre>
+  </div>
+
+  <div id="onboarding" class="onboard-overlay">
+    <div class="onboard-card">
+      <button id="onboardSkip" class="onboard-skip">Skip</button>
+
+      <div class="ob-visual-wrap">
+        <div class="ob-visual" id="obVisual1">
+          <svg viewBox="0 0 100 80" width="100" height="80">
+            <path class="ob-corner" d="M6,26 L6,6 L26,6"/>
+            <path class="ob-corner" d="M74,6 L94,6 L94,26"/>
+            <path class="ob-corner" d="M94,54 L94,74 L74,74"/>
+            <path class="ob-corner" d="M26,74 L6,74 L6,54"/>
+          </svg>
+        </div>
+        <div class="ob-visual" id="obVisual2">
+          <svg viewBox="0 0 100 80" width="100" height="80">
+            <g stroke="#FFD24A" stroke-width="1.5" opacity="0.5">
+              <line x1="50" y1="70" x2="30" y2="20"/>
+              <line x1="50" y1="70" x2="50" y2="10"/>
+              <line x1="50" y1="70" x2="70" y2="20"/>
+            </g>
+            <circle class="ob-joint" cx="50" cy="70" r="5" style="animation-delay:0s"/>
+            <circle class="ob-joint" cx="30" cy="20" r="4" style="animation-delay:0.15s"/>
+            <circle class="ob-joint" cx="50" cy="10" r="4" style="animation-delay:0.3s"/>
+            <circle class="ob-joint" cx="70" cy="20" r="4" style="animation-delay:0.45s"/>
+          </svg>
+        </div>
+        <div class="ob-visual" id="obVisual3">
+          <div class="ob-record-demo"><div class="ob-record-dot"></div></div>
+        </div>
+        <div class="ob-visual" id="obVisual4">
+          <svg viewBox="0 0 24 24" width="60" height="60" fill="none" stroke="#46FF82" stroke-width="1.4" class="ob-cube-spin">
+            <path d="M12 2 L20 6.5 L20 15.5 L12 20 L4 15.5 L4 6.5 Z"/>
+            <path d="M12 2 L12 11 M4 6.5 L12 11 L20 6.5 M12 11 L12 20"/>
+          </svg>
+        </div>
+        <div class="ob-visual" id="obVisual5">
+          <div class="ob-btn-pair">
+            <div class="ob-mini-btn ob-mini-1">⚙</div>
+            <div class="ob-mini-btn ob-mini-2">{ }</div>
+          </div>
+        </div>
+      </div>
+
+      <h3 id="onboardTitle"></h3>
+      <p id="onboardDesc"></p>
+
+      <div class="onboard-dots" id="onboardDots">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+
+      <div class="onboard-actions">
+        <button id="onboardBack">Back</button>
+        <button id="onboardNext">Next</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -559,6 +670,54 @@ function updateBox3D(poly) {
   box3D.lineMat.color.setStyle(settings.frameColor);
 }
 
+function roundRectPath(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+// Burned into the canvas itself so it's part of the recorded video, not just an
+// on-screen overlay. Only appears while actively recording. Drawn in a reset
+// transform so it stays upright and un-mirrored regardless of view mode.
+function drawWatermark() {
+  if (!isRecording) return;
+  const line1 = 'berkisodd.github.io/handmesh';
+  const line2 = 'Created by Berk :)';
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.textBaseline = 'top';
+
+  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  const w1 = ctx.measureText(line1).width;
+  ctx.font = '400 12px -apple-system, system-ui, sans-serif';
+  const w2 = ctx.measureText(line2).width;
+
+  const pad = 10;
+  const boxW = Math.max(w1, w2) + pad * 2;
+  const boxH = 40;
+  const x = canvas.width - boxW - 14;
+  const y = canvas.height - boxH - 14;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  roundRectPath(ctx, x, y, boxW, boxH, 8);
+  ctx.fill();
+
+  ctx.fillStyle = '#7CFF9E';
+  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  ctx.fillText(line1, x + pad, y + 7);
+
+  ctx.fillStyle = 'rgba(234,255,241,0.85)';
+  ctx.font = '400 12px -apple-system, system-ui, sans-serif';
+  ctx.fillText(line2, x + pad, y + 22);
+
+  ctx.restore();
+}
+
 function render3D(handRes) {
   const raw = handRes.landmarks || [];
   const handedRaw = handRes.handednesses || handRes.handedness || [];
@@ -591,6 +750,7 @@ function render3D(handRes) {
   ctx.filter = 'none';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(threeCanvas, 0, 0, canvas.width, canvas.height);
+  drawWatermark();
 
   hud.textContent = hands.length === 0
     ? "3D data view \u00B7 show your hands"
@@ -867,6 +1027,8 @@ function renderCamera(handRes) {
     hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), twoHands));
   }
 
+  drawWatermark();
+
   hud.textContent = hands.length === 0
     ? "show your hands to the camera"
     : `${hands.length} hand${hands.length > 1 ? 's' : ''} tracked`
@@ -979,6 +1141,62 @@ function bindControls() {
 
   syncControlAvailability();
 }
+
+/* ---------------- onboarding walkthrough ---------------- */
+
+const ONBOARD_STEPS = [
+  { title: 'Frame it with your hands', desc: 'Bring your thumb and index finger together on each hand to draw a box.', visual: 1 },
+  { title: 'Live hand tracking', desc: 'Every joint on both hands is tracked in real time, right over the camera.', visual: 2 },
+  { title: 'Style & raw data', desc: 'Style changes the colors and effects. Data shows the raw tracking numbers.', visual: 5 },
+  { title: 'Hit record', desc: 'Tap the shutter to capture your moves, with a live timer.', visual: 3 },
+  { title: '3D data view', desc: 'Tap the cube to see the raw hands and box floating in real 3D space.', visual: 4 }
+];
+
+let obIndex = 0;
+const onboardEl = document.getElementById('onboarding');
+const onboardTitle = document.getElementById('onboardTitle');
+const onboardDesc = document.getElementById('onboardDesc');
+const onboardDots = document.getElementById('onboardDots').querySelectorAll('span');
+const onboardBack = document.getElementById('onboardBack');
+const onboardNext = document.getElementById('onboardNext');
+
+function renderOnboardStep() {
+  const s = ONBOARD_STEPS[obIndex];
+  onboardTitle.textContent = s.title;
+  onboardDesc.textContent = s.desc;
+  document.querySelectorAll('.ob-visual').forEach(el => el.classList.remove('active'));
+  document.getElementById('obVisual' + s.visual).classList.add('active');
+  onboardDots.forEach((d, i) => d.classList.toggle('active', i === obIndex));
+  onboardBack.disabled = obIndex === 0;
+  onboardNext.textContent = obIndex === ONBOARD_STEPS.length - 1 ? "Let's go" : 'Next';
+}
+
+function showOnboarding() {
+  obIndex = 0;
+  renderOnboardStep();
+  onboardEl.classList.add('show');
+}
+
+function hideOnboarding() {
+  onboardEl.classList.remove('show');
+  try { localStorage.setItem('handmesh_onboarded', '1'); } catch (e) { /* private mode — skip persistence */ }
+}
+
+onboardNext.addEventListener('click', () => {
+  if (obIndex < ONBOARD_STEPS.length - 1) { obIndex++; renderOnboardStep(); }
+  else hideOnboarding();
+});
+onboardBack.addEventListener('click', () => {
+  if (obIndex > 0) { obIndex--; renderOnboardStep(); }
+});
+document.getElementById('onboardSkip').addEventListener('click', hideOnboarding);
+document.getElementById('helpBtn').addEventListener('click', showOnboarding);
+
+// Shown once per browser on first visit; runs independently of camera/model
+// loading so it's useful reading time rather than a blocking step.
+try {
+  if (!localStorage.getItem('handmesh_onboarded')) showOnboarding();
+} catch (e) { /* localStorage unavailable — just skip onboarding */ }
 
 init().catch(err => {
   hud.textContent = "error: " + err.message;
