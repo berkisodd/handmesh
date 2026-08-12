@@ -70,13 +70,6 @@
   <div id="stylePanel" class="sheet">
     <div class="sheet-handle"></div>
     <div class="row">
-      <label>Frame shape</label>
-      <select id="frameShape">
-        <option value="rect">Oriented rectangle</option>
-        <option value="hull">Raw hull</option>
-      </select>
-    </div>
-    <div class="row">
       <label>Frame color</label>
       <input type="color" id="frameColor" value="#46ff82">
     </div>
@@ -99,6 +92,10 @@
       </select>
     </div>
     <div class="row">
+      <label>Depth / twist <span id="depthVal">1.00</span></label>
+      <input type="range" id="depthAmount" min="0" max="250" value="100">
+    </div>
+    <div class="row">
       <label>Pixelation <span id="blockResVal">64</span></label>
       <input type="range" id="blockRes" min="8" max="160" value="64">
     </div>
@@ -107,8 +104,8 @@
       <input type="range" id="opacity" min="10" max="100" value="85">
     </div>
     <div class="row">
-      <label>Smoothing <span id="smoothVal">0.55</span></label>
-      <input type="range" id="smoothing" min="0" max="95" value="55">
+      <label>Smoothing <span id="smoothVal">0.35</span></label>
+      <input type="range" id="smoothing" min="0" max="90" value="35">
     </div>
     <div class="row">
       <label>Scale <span id="scaleVal">1.00</span></label>
@@ -123,6 +120,7 @@
       </select>
     </div>
     <div class="row toggles">
+      <label><input type="checkbox" id="depthShade" checked> Depth shading on edges</label>
       <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
       <label><input type="checkbox" id="showOutline" checked> Show frame outline</label>
       <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
@@ -164,15 +162,16 @@ const LANDMARK_NAMES = [
 ];
 
 const DEFAULTS = {
-  frameShape: 'rect',
   frameColor: '#46ff82',
   effectStyle: 'invert',
   blendMode: 'multiply',
+  depthAmount: 1.0,
   blockRes: 64,
   opacity: 0.85,
-  smoothing: 0.55,
+  smoothing: 0.35,
   frameScale: 1.0,
   skeletonMode: 'two-tone',
+  depthShade: true,
   showSkeleton: true,
   showOutline: true,
   mirror: true
@@ -181,8 +180,7 @@ const settings = { ...DEFAULTS };
 
 let handLandmarker;
 let fxCanvas, fxCtx, maskLow, maskCtx;
-let smoothedCorners = null;   // persisted for EMA smoothing
-let lastAngle = 0;
+let smoothedCorners = null;
 
 function hexToRgba(hex, a) {
   const v = hex.replace('#', '');
@@ -235,8 +233,7 @@ function resizeMask() {
 
 let lastVideoTime = -1;
 let lastRafTs = performance.now();
-let fps = 0;
-let detectMs = 0;
+let fps = 0, detectMs = 0;
 
 function loop(ts) {
   const dt = ts - lastRafTs;
@@ -253,59 +250,37 @@ function loop(ts) {
   requestAnimationFrame(loop);
 }
 
-const toPx = lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height });
+const toPx = lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
 
-function convexHull(points) {
-  const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
-  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop(); lower.pop();
-  return lower.concat(upper);
-}
+/* Build the quad straight from the four fingertips — this is what made the
+   earlier version feel alive. Order them around the centroid so the polygon
+   never self-intersects, then push each corner along the centroid ray by its
+   relative depth: near corners bulge out, far corners pull in. That's what
+   sells the twist as perspective instead of a flat spinning rect. */
+function buildQuad(tipPoints) {
+  const cx = tipPoints.reduce((s, p) => s + p.x, 0) / tipPoints.length;
+  const cy = tipPoints.reduce((s, p) => s + p.y, 0) / tipPoints.length;
 
-/* Rotating calipers: smallest-area rectangle enclosing the hull.
-   The optimal rect always shares an edge with the hull, so test each edge angle. */
-function minAreaRect(hull) {
-  if (hull.length < 3) return null;
-  let best = null;
+  const ordered = tipPoints
+    .map(p => ({ ...p, ang: Math.atan2(p.y - cy, p.x - cx) }))
+    .sort((a, b) => a.ang - b.ang);
 
-  for (let i = 0; i < hull.length; i++) {
-    const p1 = hull[i], p2 = hull[(i + 1) % hull.length];
-    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-    const cos = Math.cos(-angle), sin = Math.sin(-angle);
+  const zs = ordered.map(p => p.z);
+  const zMin = Math.min(...zs), zMax = Math.max(...zs);
+  const zRange = Math.max(1e-4, zMax - zMin);
+  const k = settings.depthAmount;
 
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const p of hull) {
-      const rx = p.x * cos - p.y * sin;
-      const ry = p.x * sin + p.y * cos;
-      if (rx < minX) minX = rx;
-      if (rx > maxX) maxX = rx;
-      if (ry < minY) minY = ry;
-      if (ry > maxY) maxY = ry;
-    }
-    const area = (maxX - minX) * (maxY - minY);
-    if (!best || area < best.area) best = { area, angle, minX, maxX, minY, maxY };
-  }
-  if (!best) return null;
-
-  // rotate the 4 rect corners back into image space
-  const cos = Math.cos(best.angle), sin = Math.sin(best.angle);
-  const local = [
-    [best.minX, best.minY], [best.maxX, best.minY],
-    [best.maxX, best.maxY], [best.minX, best.maxY]
-  ];
-  const corners = local.map(([x, y]) => ({ x: x * cos - y * sin, y: x * sin + y * cos }));
-  return { corners, angle: best.angle };
+  return ordered.map(p => {
+    // 0 = nearest corner, 1 = farthest (MediaPipe z is negative toward camera)
+    const t = (p.z - zMin) / zRange;
+    const push = 1 + (0.5 - t) * 0.45 * k;
+    return {
+      x: cx + (p.x - cx) * push,
+      y: cy + (p.y - cy) * push,
+      z: p.z,
+      depth: t
+    };
+  });
 }
 
 function centroid(pts) {
@@ -314,26 +289,10 @@ function centroid(pts) {
   return { x: cx / pts.length, y: cy / pts.length };
 }
 
-function scalePolygon(pts, factor) {
-  if (factor === 1) return pts;
+function scalePolygon(pts, f) {
+  if (f === 1) return pts;
   const c = centroid(pts);
-  return pts.map(p => ({ x: c.x + (p.x - c.x) * factor, y: c.y + (p.y - c.y) * factor }));
-}
-
-/* Corners can come back in a rotated order between frames, which makes naive
-   EMA smoothing tear the shape apart. Align to the previous frame first. */
-function alignCornerOrder(corners, prev) {
-  if (!prev || prev.length !== corners.length) return corners;
-  let bestOffset = 0, bestCost = Infinity;
-  for (let off = 0; off < corners.length; off++) {
-    let cost = 0;
-    for (let i = 0; i < corners.length; i++) {
-      const c = corners[(i + off) % corners.length];
-      cost += (c.x - prev[i].x) ** 2 + (c.y - prev[i].y) ** 2;
-    }
-    if (cost < bestCost) { bestCost = cost; bestOffset = off; }
-  }
-  return corners.map((_, i) => corners[(i + bestOffset) % corners.length]);
+  return pts.map(p => ({ ...p, x: c.x + (p.x - c.x) * f, y: c.y + (p.y - c.y) * f }));
 }
 
 function smoothCorners(corners) {
@@ -342,10 +301,11 @@ function smoothCorners(corners) {
     smoothedCorners = corners.map(p => ({ ...p }));
     return smoothedCorners;
   }
-  const aligned = alignCornerOrder(corners, smoothedCorners);
   smoothedCorners = smoothedCorners.map((prev, i) => ({
-    x: prev.x * a + aligned[i].x * (1 - a),
-    y: prev.y * a + aligned[i].y * (1 - a)
+    x: prev.x * a + corners[i].x * (1 - a),
+    y: prev.y * a + corners[i].y * (1 - a),
+    z: corners[i].z,
+    depth: prev.depth * a + corners[i].depth * (1 - a)
   }));
   return smoothedCorners;
 }
@@ -412,6 +372,29 @@ function buildLowResMask(poly) {
   maskCtx.fill();
 }
 
+/* Edges shaded by the depth of their endpoints — near edges bright and thick,
+   far edges dim and thin. Cheap, but it's the cue that reads as 3D. */
+function drawDepthEdges(poly) {
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const d = (a.depth + b.depth) / 2;
+    const near = 1 - d;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = hexToRgba(settings.frameColor, 0.25 + near * 0.75);
+    ctx.lineWidth = 1.5 + near * 4;
+    ctx.stroke();
+  }
+  for (const p of poly) {
+    const near = 1 - p.depth;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3 + near * 5, 0, Math.PI * 2);
+    ctx.fillStyle = hexToRgba(settings.frameColor, 0.4 + near * 0.6);
+    ctx.fill();
+  }
+}
+
 function drawFrameEffect(poly) {
   const tint = hexToRgba(settings.frameColor, settings.opacity);
 
@@ -450,7 +433,9 @@ function drawFrameEffect(poly) {
     ctx.drawImage(fxCanvas, 0, 0);
   }
 
-  if (settings.showOutline || settings.effectStyle === 'outline') {
+  if (settings.depthShade) {
+    drawDepthEdges(poly);
+  } else if (settings.showOutline || settings.effectStyle === 'outline') {
     const isOutlineMode = settings.effectStyle === 'outline';
     tracePath(ctx, poly);
     ctx.strokeStyle = hexToRgba(settings.frameColor, isOutlineMode ? Math.max(settings.opacity, 0.6) : 0.4);
@@ -460,20 +445,20 @@ function drawFrameEffect(poly) {
 }
 
 let dataFrameCounter = 0;
-function updateDataPanel(hands, handedness, poly, angleDeg) {
+function updateDataPanel(hands, handedness, poly, tilt) {
   if (!document.getElementById('dataPanel').classList.contains('open')) return;
   if (++dataFrameCounter % 5 !== 0) return;
 
   let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\n`;
   if (poly) {
     out += `frame area  ${polygonArea(poly).toFixed(0)} px\u00B2\n`;
-    out += `frame angle ${angleDeg.toFixed(1)}\u00B0\n`;
+    out += `depth tilt  ${tilt.toFixed(3)}\n`;
+    out += `corner z    ${poly.map(p => p.z.toFixed(3)).join('  ')}\n`;
   }
   out += `\n`;
 
   hands.forEach((h, i) => {
     const hd = handedness?.[i]?.[0];
-    // handedness is reported in camera space; mirrored view flips what you see
     const shown = hd ? (settings.mirror
       ? (hd.categoryName === 'Left' ? 'Right' : 'Left')
       : hd.categoryName) : null;
@@ -494,7 +479,6 @@ function render(handRes) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  // stable ordering: sort by wrist x so hand 0 stays hand 0 between frames
   const raw = handRes.landmarks || [];
   const handedRaw = handRes.handednesses || handRes.handedness || [];
   const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
@@ -502,33 +486,18 @@ function render(handRes) {
   const handedness = order.map(i => handedRaw[i]);
 
   const twoHands = hands.length >= 2;
-  let poly = null;
-  let angleDeg = 0;
+  let poly = null, tilt = 0;
 
   if (twoHands) {
-    const pts = [];
-    for (const h of hands.slice(0, 2)) pts.push(toPx(h[4]), toPx(h[8]));
-    const hull = convexHull(pts);
-
-    if (hull.length >= 3) {
-      let shape = hull;
-      if (settings.frameShape === 'rect') {
-        const rect = minAreaRect(hull);
-        if (rect) {
-          shape = rect.corners;
-          // unwrap angle so it doesn't jump ±90° as the best edge changes
-          let a = rect.angle;
-          while (a - lastAngle > Math.PI / 4) a -= Math.PI / 2;
-          while (lastAngle - a > Math.PI / 4) a += Math.PI / 2;
-          lastAngle = a;
-          angleDeg = a * 180 / Math.PI;
-        }
-      }
-      poly = smoothCorners(scalePolygon(shape, settings.frameScale));
-      drawFrameEffect(poly);
-    }
+    const tips = [];
+    for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
+    const quad = buildQuad(tips);
+    poly = smoothCorners(scalePolygon(quad, settings.frameScale));
+    const zs = poly.map(p => p.z);
+    tilt = Math.max(...zs) - Math.min(...zs);
+    drawFrameEffect(poly);
   } else {
-    smoothedCorners = null; // reset so it doesn't snap back from a stale shape
+    smoothedCorners = null;
   }
 
   if (settings.showSkeleton) {
@@ -538,9 +507,9 @@ function render(handRes) {
   hud.textContent = hands.length === 0
     ? "show your hands to the camera"
     : `${hands.length} hand${hands.length > 1 ? 's' : ''} tracked`
-      + (twoHands ? ` \u00B7 frame ${angleDeg.toFixed(0)}\u00B0` : " \u00B7 bring both hands in for the effect");
+      + (twoHands ? ` \u00B7 tilt ${tilt.toFixed(2)}` : " \u00B7 bring both hands in for the effect");
 
-  updateDataPanel(hands, handedness, poly, angleDeg);
+  updateDataPanel(hands, handedness, poly, tilt);
 }
 
 function bindControls() {
@@ -551,10 +520,13 @@ function bindControls() {
   $('styleToggle').onclick = () => { dataPanel.classList.remove('open'); stylePanel.classList.toggle('open'); };
   $('dataToggle').onclick  = () => { stylePanel.classList.remove('open'); dataPanel.classList.toggle('open'); };
 
-  $('frameShape').addEventListener('change', e => { settings.frameShape = e.target.value; smoothedCorners = null; });
   $('frameColor').addEventListener('input', e => settings.frameColor = e.target.value);
   $('effectStyle').addEventListener('change', e => settings.effectStyle = e.target.value);
   $('blendMode').addEventListener('change', e => settings.blendMode = e.target.value);
+  $('depthAmount').addEventListener('input', e => {
+    settings.depthAmount = parseInt(e.target.value, 10) / 100;
+    $('depthVal').textContent = settings.depthAmount.toFixed(2);
+  });
   $('blockRes').addEventListener('input', e => {
     settings.blockRes = parseInt(e.target.value, 10);
     $('blockResVal').textContent = settings.blockRes;
@@ -573,6 +545,7 @@ function bindControls() {
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
   });
   $('skeletonMode').addEventListener('change', e => settings.skeletonMode = e.target.value);
+  $('depthShade').addEventListener('change', e => settings.depthShade = e.target.checked);
   $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
   $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
   $('mirrorToggle').addEventListener('change', e => {
@@ -583,10 +556,11 @@ function bindControls() {
   $('resetBtn').addEventListener('click', () => {
     Object.assign(settings, DEFAULTS);
     smoothedCorners = null;
-    $('frameShape').value = settings.frameShape;
     $('frameColor').value = settings.frameColor;
     $('effectStyle').value = settings.effectStyle;
     $('blendMode').value = settings.blendMode;
+    $('depthAmount').value = settings.depthAmount * 100;
+    $('depthVal').textContent = settings.depthAmount.toFixed(2);
     $('blockRes').value = settings.blockRes;
     $('blockResVal').textContent = settings.blockRes;
     $('opacity').value = settings.opacity * 100;
@@ -596,6 +570,7 @@ function bindControls() {
     $('frameScale').value = settings.frameScale * 100;
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
     $('skeletonMode').value = settings.skeletonMode;
+    $('depthShade').checked = true;
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
