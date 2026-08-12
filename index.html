@@ -11,8 +11,7 @@
   video { display:none; }
   canvas {
     position:absolute; top:0; left:0; width:100%; height:100%;
-    object-fit:cover; /* mirroring is baked into the pixel buffer in render(), not CSS —
-                          CSS transforms don't apply to captureStream() output */
+    object-fit:cover;
   }
   #hud {
     position:absolute; top:14px; left:14px; z-index:5;
@@ -36,8 +35,6 @@
     border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600;
   }
 
-  /* Camera-app style shutter button, bottom center, own layer — not sharing
-     a container with any other control so it can't visually collide with them. */
   #recordBtn {
     position:fixed; left:50%; bottom:calc(26px + env(safe-area-inset-bottom));
     transform:translateX(-50%); z-index:8;
@@ -56,6 +53,17 @@
   #recordBtn.unsupported { opacity:0.35; }
   #recordBtn.unsupported #recordBtnInner { background:#888; }
 
+  #viewModeBtn {
+    position:fixed; left:calc(50% - 68px); bottom:calc(37px + env(safe-area-inset-bottom));
+    transform:translateX(-50%); z-index:8;
+    width:50px; height:50px; border-radius:50%;
+    background:rgba(0,0,0,0.45); border:2px solid rgba(124,255,158,0.5);
+    display:flex; align-items:center; justify-content:center; padding:0; color:#7CFF9E;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #viewModeBtn.active { background:rgba(70,255,130,0.28); border-color:#46FF82; color:#EAFFF1; }
+  #viewModeBtn:disabled { opacity:0.4; }
+
   .sheet {
     position:fixed; left:0; right:0; bottom:0; max-height:50vh; overflow-y:auto;
     background:rgba(9,13,11,0.92); backdrop-filter: blur(12px);
@@ -66,11 +74,11 @@
   }
   .sheet.open { transform:translateY(0); }
   .sheet-handle { width:36px; height:4px; border-radius:2px; background:rgba(124,255,158,0.4); margin:8px auto 14px; }
-  .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; color:#CDEFD9; font-size:14px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; color:#CDEFD9; font-size:14px; transition:opacity .15s; }
   .row > label:first-child { flex-shrink:0; opacity:0.85; }
   .row select { flex:1; max-width:180px; }
   .row input[type=range] { flex:1; accent-color:#46FF82; }
-  .row.disabled { opacity:0.35; pointer-events:none; }
+  .row.disabled { opacity:0.32; pointer-events:none; }
   select {
     background:rgba(255,255,255,0.08); color:#EAFFF1; border:1px solid rgba(124,255,158,0.3);
     border-radius:6px; padding:5px 8px; font-size:13px;
@@ -112,6 +120,12 @@
     <button id="dataToggle">{ } Data</button>
   </div>
 
+  <button id="viewModeBtn" aria-label="3D data view" title="3D data view">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
+      <path d="M12 2 L20 6.5 L20 15.5 L12 20 L4 15.5 L4 6.5 Z"/>
+      <path d="M12 2 L12 11 M4 6.5 L12 11 L20 6.5 M12 11 L12 20"/>
+    </svg>
+  </button>
   <button id="recordBtn" aria-label="Record"><span id="recordBtnInner"></span></button>
 
   <div id="stylePanel" class="sheet">
@@ -122,7 +136,7 @@
       <a id="downloadLink" href="#" download="hand-frame.webm">Download video</a>
     </div>
 
-    <div class="row">
+    <div class="row" id="depthModeRow">
       <label>Depth mode</label>
       <select id="depthMode">
         <option value="flat">Flat (simple)</option>
@@ -138,7 +152,7 @@
       <label>Frame color</label>
       <input type="color" id="frameColor" value="#46ff82">
     </div>
-    <div class="row">
+    <div class="row" id="effectRow">
       <label>Effect</label>
       <select id="effectStyle">
         <option value="invert">Invert + tint</option>
@@ -147,7 +161,7 @@
         <option value="outline">Outline only</option>
       </select>
     </div>
-    <div class="row">
+    <div class="row" id="blendRow">
       <label>Blend mode</label>
       <select id="blendMode">
         <option value="multiply">Multiply</option>
@@ -156,7 +170,7 @@
         <option value="difference">Difference</option>
       </select>
     </div>
-    <div class="row">
+    <div class="row" id="pixelRow">
       <label>Pixelation <span id="blockResVal">64</span></label>
       <input type="range" id="blockRes" min="8" max="160" value="64">
     </div>
@@ -182,7 +196,7 @@
     </div>
     <div class="row toggles">
       <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
-      <label><input type="checkbox" id="showOutline" checked> Show frame outline</label>
+      <label><input type="checkbox" id="showOutline" checked> Show frame outline / box</label>
       <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
     </div>
     <button id="resetBtn">Reset to defaults</button>
@@ -208,6 +222,7 @@ const recordTimer = document.getElementById('recordTimer');
 const recordingAlert = document.getElementById('recordingAlert');
 const recordMsg = document.getElementById('recordMsg');
 const downloadLink = document.getElementById('downloadLink');
+const viewModeBtn = document.getElementById('viewModeBtn');
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -228,6 +243,7 @@ const LANDMARK_NAMES = [
 ];
 
 const DEFAULTS = {
+  viewMode: 'camera', // 'camera' | '3d'
   depthMode: 'shade',
   depthAmount: 0.6,
   frameColor: '#46ff82',
@@ -256,12 +272,20 @@ let recordingStartTime = 0;
 let recordMimeType = null;
 
 const MIME_CANDIDATES = [
-  'video/mp4;codecs=avc1',   // Safari / iOS
+  'video/mp4;codecs=avc1',
   'video/mp4',
-  'video/webm;codecs=vp9',   // Chrome / Firefox
+  'video/webm;codecs=vp9',
   'video/webm;codecs=vp8',
   'video/webm'
 ];
+
+// --- 3D data viewport (lazy-loaded) ---
+let THREE = null;
+let threeReady = false;
+let threeRenderer, threeScene, threeCamera, threeCanvas;
+let handGroups3D = [];
+let box3D = null; // { group, geom, mat, lineGeom, lineMat }
+const SCENE_W = 4, Z_SCALE = 9;
 
 function hexToRgba(hex, a) {
   const v = hex.replace('#', '');
@@ -323,9 +347,8 @@ function setupRecording() {
     disableRecording('No supported recording format on this device');
     return;
   }
-
   try {
-    const stream = canvas.captureStream(30);
+    const stream = canvas.captureStream(30); // same visible canvas in both modes, so recording works regardless of view
     mediaRecorder = new MediaRecorder(stream, { mimeType: recordMimeType });
   } catch (err) {
     console.warn('MediaRecorder init failed:', err);
@@ -375,6 +398,163 @@ recordBtn.addEventListener('click', () => {
   }
 });
 
+/* ---------------- 3D data viewport ---------------- */
+
+async function ensureThree() {
+  if (THREE) return;
+  const mod = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+  THREE = mod;
+  initThreeScene();
+}
+
+function makeHandGroup3D() {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: 0x46ff82 });
+  const jointGeom = new THREE.SphereGeometry(1, 8, 6);
+  const joints = [];
+  for (let i = 0; i < 21; i++) {
+    const mesh = new THREE.Mesh(jointGeom, mat);
+    mesh.scale.setScalar(TIP_IDX.includes(i) ? 0.05 : 0.028);
+    group.add(mesh);
+    joints.push(mesh);
+  }
+  const lineGeom = new THREE.BufferGeometry();
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(HAND_CONNECTIONS.length * 2 * 3), 3));
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x46ff82 });
+  const lines = new THREE.LineSegments(lineGeom, lineMat);
+  group.add(lines);
+  threeScene.add(group);
+  return { group, joints, mat, lineGeom, lineMat };
+}
+
+function initThreeScene() {
+  threeCanvas = document.createElement('canvas');
+  threeCanvas.width = canvas.width;
+  threeCanvas.height = canvas.height;
+  threeRenderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true });
+  threeRenderer.setPixelRatio(1);
+  threeRenderer.setSize(canvas.width, canvas.height, false);
+
+  threeScene = new THREE.Scene();
+  threeScene.background = new THREE.Color(0x0a0f0c);
+  threeScene.fog = new THREE.Fog(0x0a0f0c, 3, 9);
+
+  threeCamera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.05, 50);
+
+  const grid = new THREE.GridHelper(8, 20, 0x2a4a35, 0x162019);
+  grid.position.y = -1.4;
+  threeScene.add(grid);
+  threeScene.add(new THREE.AxesHelper(0.6));
+
+  handGroups3D = [makeHandGroup3D(), makeHandGroup3D()];
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(4 * 3), 3));
+  geom.setIndex([0, 1, 2, 0, 2, 3]);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x46ff82, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geom, mat);
+
+  const lineGeom = new THREE.BufferGeometry();
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(4 * 3), 3));
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x46ff82 });
+  const line = new THREE.LineLoop(lineGeom, lineMat);
+
+  const group = new THREE.Group();
+  group.add(mesh, line);
+  threeScene.add(group);
+  box3D = { group, geom, mat, lineGeom, lineMat };
+}
+
+function pxToScene(p) {
+  const sceneH = SCENE_W * canvas.height / canvas.width;
+  const mirrorSign = settings.mirror ? -1 : 1;
+  const nx = (p.x / canvas.width - 0.5) * mirrorSign;
+  const ny = (p.y / canvas.height - 0.5);
+  return new THREE.Vector3(nx * SCENE_W, -ny * sceneH, -(p.z || 0) * Z_SCALE);
+}
+
+function updateHandGroup3D(idx, landmarksPx, color) {
+  const g = handGroups3D[idx];
+  g.group.visible = true;
+  g.mat.color.setStyle(color);
+  g.lineMat.color.setStyle(color);
+
+  landmarksPx.forEach((p, i) => {
+    const v = pxToScene(p);
+    g.joints[i].position.copy(v);
+  });
+
+  const positions = g.lineGeom.attributes.position.array;
+  HAND_CONNECTIONS.forEach(([a, b], i) => {
+    const va = g.joints[a].position, vb = g.joints[b].position;
+    positions[i*6]=va.x; positions[i*6+1]=va.y; positions[i*6+2]=va.z;
+    positions[i*6+3]=vb.x; positions[i*6+4]=vb.y; positions[i*6+5]=vb.z;
+  });
+  g.lineGeom.attributes.position.needsUpdate = true;
+}
+
+function updateBox3D(poly) {
+  box3D.group.visible = true;
+  const v = poly.map(pxToScene);
+  const pos = box3D.geom.attributes.position;
+  const linePos = box3D.lineGeom.attributes.position;
+  for (let i = 0; i < 4; i++) {
+    pos.setXYZ(i, v[i].x, v[i].y, v[i].z);
+    linePos.setXYZ(i, v[i].x, v[i].y, v[i].z);
+  }
+  pos.needsUpdate = true;
+  linePos.needsUpdate = true;
+  box3D.geom.computeVertexNormals();
+  box3D.mat.color.setStyle(settings.frameColor);
+  box3D.mat.opacity = settings.opacity * 0.55;
+  box3D.lineMat.color.setStyle(settings.frameColor);
+}
+
+function render3D(handRes) {
+  const raw = handRes.landmarks || [];
+  const handedRaw = handRes.handednesses || handRes.handedness || [];
+  const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
+  const hands = order.map(i => raw[i]);
+  const handedness = order.map(i => handedRaw[i]);
+
+  handGroups3D.forEach((g, i) => {
+    if (i < hands.length) updateHandGroup3D(i, hands[i].map(toPx), skeletonColorFor(i));
+    else g.group.visible = false;
+  });
+
+  const twoHands = hands.length >= 2;
+  let poly = null;
+  if (twoHands && settings.showOutline) {
+    const tips = [];
+    for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
+    const quad = buildQuad(tips);
+    poly = smoothCorners(scalePolygon(quad, settings.frameScale));
+    updateBox3D(poly);
+  } else {
+    box3D.group.visible = false;
+    if (!twoHands) smoothedCorners = null;
+  }
+
+  const t = performance.now() * 0.00018;
+  threeCamera.position.set(Math.sin(t) * 2.6, 0.5, Math.cos(t) * 2.6);
+  threeCamera.lookAt(0, -0.1, 0);
+  threeRenderer.render(threeScene, threeCamera);
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.filter = 'none';
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(threeCanvas, 0, 0, canvas.width, canvas.height);
+
+  hud.textContent = hands.length === 0
+    ? "3D data view \u00B7 show your hands"
+    : `3D data view \u00B7 ${hands.length} hand${hands.length > 1 ? 's' : ''} tracked`;
+
+  updateDataPanel(hands, handedness, poly, 0);
+}
+
+/* ---------------- shared tracking + camera-mode render ---------------- */
+
 let lastVideoTime = -1;
 let lastRafTs = performance.now();
 let fps = 0, detectMs = 0;
@@ -394,7 +574,8 @@ function loop(ts) {
     const t0 = performance.now();
     const handRes = handLandmarker.detectForVideo(video, ts);
     detectMs = detectMs * 0.9 + (performance.now() - t0) * 0.1;
-    render(handRes);
+    if (settings.viewMode === '3d' && threeReady) render3D(handRes);
+    else renderCamera(handRes);
   }
   requestAnimationFrame(loop);
 }
@@ -581,10 +762,9 @@ function updateDataPanel(hands, handedness, poly, tilt) {
   if (!document.getElementById('dataPanel').classList.contains('open')) return;
   if (++dataFrameCounter % 5 !== 0) return;
 
-  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\ndepth mode  ${settings.depthMode}\nrec codec   ${recordMimeType || 'n/a'}\n`;
+  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\nview mode   ${settings.viewMode}\nrec codec   ${recordMimeType || 'n/a'}\n`;
   if (poly) {
     out += `frame area  ${polygonArea(poly).toFixed(0)} px\u00B2\n`;
-    out += `depth tilt  ${tilt.toFixed(3)}\n`;
     out += `corner z    ${poly.map(p => p.z.toFixed(3)).join('  ')}\n`;
   }
   out += `\n`;
@@ -604,19 +784,16 @@ function updateDataPanel(hands, handedness, poly, tilt) {
   dataOut.textContent = out.trimEnd();
 }
 
-function render(handRes) {
+function renderCamera(handRes) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
   ctx.filter = 'none';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Mirror is baked into the pixel buffer here (not CSS) so recordings via
-  // captureStream() match exactly what's shown on screen.
   if (settings.mirror) {
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
   }
-
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   const raw = handRes.landmarks || [];
@@ -657,17 +834,47 @@ function bindControls() {
   const stylePanel = $('stylePanel');
   const dataPanel  = $('dataPanel');
 
-  const syncDepthRow = () => {
-    $('depthAmountRow').classList.toggle('disabled', settings.depthMode !== 'warp');
+  const syncControlAvailability = () => {
+    const is3d = settings.viewMode === '3d';
+    $('depthModeRow').classList.toggle('disabled', is3d);
+    $('depthAmountRow').classList.toggle('disabled', is3d || settings.depthMode !== 'warp');
+    $('effectRow').classList.toggle('disabled', is3d);
+    $('blendRow').classList.toggle('disabled', is3d);
+    $('pixelRow').classList.toggle('disabled', is3d);
   };
 
   $('styleToggle').onclick = () => { dataPanel.classList.remove('open'); stylePanel.classList.toggle('open'); };
   $('dataToggle').onclick  = () => { stylePanel.classList.remove('open'); dataPanel.classList.toggle('open'); };
 
+  viewModeBtn.addEventListener('click', async () => {
+    if (settings.viewMode === 'camera') {
+      if (!threeReady) {
+        viewModeBtn.disabled = true;
+        hud.textContent = 'loading 3D viewport…';
+        try {
+          await ensureThree();
+          threeReady = true;
+        } catch (err) {
+          console.error('3D viewport failed to load:', err);
+          hud.textContent = '3D viewport failed to load';
+          viewModeBtn.disabled = false;
+          return;
+        }
+        viewModeBtn.disabled = false;
+      }
+      settings.viewMode = '3d';
+      viewModeBtn.classList.add('active');
+    } else {
+      settings.viewMode = 'camera';
+      viewModeBtn.classList.remove('active');
+    }
+    syncControlAvailability();
+  });
+
   $('depthMode').addEventListener('change', e => {
     settings.depthMode = e.target.value;
     smoothedCorners = null;
-    syncDepthRow();
+    syncControlAvailability();
   });
   $('depthAmount').addEventListener('input', e => {
     settings.depthAmount = parseInt(e.target.value, 10) / 100;
@@ -699,7 +906,8 @@ function bindControls() {
   $('mirrorToggle').addEventListener('change', e => { settings.mirror = e.target.checked; });
 
   $('resetBtn').addEventListener('click', () => {
-    Object.assign(settings, DEFAULTS);
+    const keepViewMode = settings.viewMode; // don't force user back to camera mode on reset
+    Object.assign(settings, DEFAULTS, { viewMode: keepViewMode });
     smoothedCorners = null;
     $('depthMode').value = settings.depthMode;
     $('depthAmount').value = settings.depthAmount * 100;
@@ -719,11 +927,11 @@ function bindControls() {
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
-    syncDepthRow();
+    syncControlAvailability();
     resizeMask();
   });
 
-  syncDepthRow();
+  syncControlAvailability();
 }
 
 init().catch(err => {
