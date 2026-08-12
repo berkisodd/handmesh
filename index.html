@@ -316,6 +316,10 @@
       <label>Scale <span id="scaleVal">1.00</span></label>
       <input type="range" id="frameScale" min="50" max="200" value="100">
     </div>
+    <div class="row" id="twistRow">
+      <label>Twist <span id="twistVal">1.00</span></label>
+      <input type="range" id="twistAmount" min="0" max="250" value="100">
+    </div>
     <div class="row">
       <label>Skeleton color</label>
       <select id="skeletonMode">
@@ -447,6 +451,7 @@ const DEFAULTS = {
   opacity: 0.85,
   smoothing: 0.35,
   frameScale: 1.0,
+  twistAmount: 1.0,
   skeletonMode: 'two-tone',
   showSkeleton: true,
   showOutline: true,
@@ -487,6 +492,9 @@ let handGroups3D = [];
 let box3D = null; // { group, geom, mat, lineGeom, lineMat }
 const SCENE_W = 4, Z_SCALE = 9;
 const CAM_FOV_DEG = 45, CONTENT_MARGIN = 1.35;
+const TWIST_SEGMENTS = 24;
+let twistTurns = 0;      // whole extra rotations accumulated past ±180°
+let lastRollAngle = null;
 
 // Canvas resolution now tracks the actual screen (portrait iPhone, landscape
 // desktop, either orientation on iPad) instead of the camera's native buffer.
@@ -607,9 +615,7 @@ function resizeCanvasToDisplay() {
   resizeMask();
 
   if (threeRenderer) {
-    threeRenderer.setSize(w, h, false);
-    threeCanvas.width = w;
-    threeCanvas.height = h;
+    threeRenderer.setSize(w, h, false); // owns threeCanvas.width/height
     updateCameraFraming();
   }
 }
@@ -757,9 +763,31 @@ function initThreeScene() {
   threeCanvas = document.createElement('canvas');
   threeCanvas.width = canvas.width;
   threeCanvas.height = canvas.height;
-  threeRenderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true });
+  threeRenderer = new THREE.WebGLRenderer({
+    canvas: threeCanvas,
+    antialias: true,
+    alpha: false,
+    // iOS Safari discards the WebGL drawing buffer immediately after a render,
+    // so copying it into the visible 2D canvas with drawImage yields black.
+    // Chrome tolerates this; Safari does not.
+    preserveDrawingBuffer: true,
+    powerPreference: 'default',
+    failIfMajorPerformanceCaveat: false
+  });
   threeRenderer.setPixelRatio(1);
   threeRenderer.setSize(canvas.width, canvas.height, false);
+  threeRenderer.setClearColor(0x0a0f0c, 1);
+
+  // Mobile GPUs can silently drop the context; recover instead of staying black.
+  threeCanvas.addEventListener('webglcontextlost', e => {
+    e.preventDefault();
+    console.warn('WebGL context lost');
+  });
+  threeCanvas.addEventListener('webglcontextrestored', () => {
+    console.warn('WebGL context restored');
+    threeRenderer.setSize(canvas.width, canvas.height, false);
+    updateCameraFraming();
+  });
 
   threeScene = new THREE.Scene();
   threeScene.background = new THREE.Color(0x0a0f0c);
@@ -776,15 +804,33 @@ function initThreeScene() {
   handGroups3D = [makeHandGroup3D(), makeHandGroup3D()];
 
   const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(4 * 3), 3));
-  geom.setIndex([0, 1, 2, 0, 2, 3]);
+  // Subdivided grid rather than a single quad — a flat 4-vertex plane can only
+  // spin, it can't twist. Extra spans let the surface rotate progressively
+  // along its length so it visibly tangles.
+  const segs = TWIST_SEGMENTS;
+  const vertCount = (segs + 1) * 2;
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3));
+  const idx = [];
+  for (let i = 0; i < segs; i++) {
+    const a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1;
+    idx.push(a, b, d, a, d, c);
+  }
+  geom.setIndex(idx);
   const mat = new THREE.MeshBasicMaterial({ color: 0x46ff82, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
   const mesh = new THREE.Mesh(geom, mat);
 
   const lineGeom = new THREE.BufferGeometry();
-  lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(4 * 3), 3));
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3));
+  const lineIdx = [];
+  for (let i = 0; i < segs; i++) {
+    const a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1;
+    lineIdx.push(a, c, b, d); // rails
+    lineIdx.push(a, b);       // rungs
+  }
+  lineIdx.push(segs * 2, segs * 2 + 1);
+  lineGeom.setIndex(lineIdx);
   const lineMat = new THREE.LineBasicMaterial({ color: 0x46ff82 });
-  const line = new THREE.LineLoop(lineGeom, lineMat);
+  const line = new THREE.LineSegments(lineGeom, lineMat);
 
   const group = new THREE.Group();
   group.add(mesh, line);
@@ -816,7 +862,16 @@ function updateCameraFraming() {
 
   threeCamera.position.set(0, dist * 0.21, dist);
   threeCamera.lookAt(0, -0.05, 0);
+  threeCamera.far = dist * 4;
   threeCamera.updateProjectionMatrix();
+
+  // Fog must track camera distance. Portrait phones need a much larger dist to
+  // fit the same content, and a fixed near/far fog range swallowed the whole
+  // scene in fog colour — which read as a black screen on iPhone.
+  if (threeScene && threeScene.fog) {
+    threeScene.fog.near = dist * 0.55;
+    threeScene.fog.far = dist * 2.4;
+  }
 }
 
 function updateHandGroup3D(idx, landmarksPx, color) {
@@ -842,15 +897,57 @@ function updateHandGroup3D(idx, landmarksPx, color) {
 function updateBox3D(poly) {
   box3D.group.visible = true;
   const v = poly.map(pxToScene);
+
+  // poly corners are angle-sorted; pair them into the two ends of a ribbon.
+  const endA0 = v[0], endA1 = v[1], endB0 = v[3], endB1 = v[2];
+  const startMid = endA0.clone().add(endA1).multiplyScalar(0.5);
+  const endMid   = endB0.clone().add(endB1).multiplyScalar(0.5);
+  const axis = endMid.clone().sub(startMid);
+  const axisLen = axis.length() || 1e-4;
+  axis.divideScalar(axisLen);
+
+  const startArm = endA1.clone().sub(endA0).multiplyScalar(0.5);
+  const endArm   = endB1.clone().sub(endB0).multiplyScalar(0.5);
+
+  // Angle between the two ends' cross-sections, measured about the ribbon axis —
+  // this is the actual twist your hands are making, not a canned animation.
+  const sPerp = startArm.clone().projectOnPlane(axis);
+  const ePerp = endArm.clone().projectOnPlane(axis);
+  let twist = 0;
+  if (sPerp.lengthSq() > 1e-8 && ePerp.lengthSq() > 1e-8) {
+    sPerp.normalize(); ePerp.normalize();
+    twist = Math.atan2(sPerp.clone().cross(ePerp).dot(axis), sPerp.dot(ePerp));
+  }
+  twist += Math.PI * 2 * twistTurns * settings.twistAmount;
+
+  const segs = TWIST_SEGMENTS;
   const pos = box3D.geom.attributes.position;
   const linePos = box3D.lineGeom.attributes.position;
-  for (let i = 0; i < 4; i++) {
-    pos.setXYZ(i, v[i].x, v[i].y, v[i].z);
-    linePos.setXYZ(i, v[i].x, v[i].y, v[i].z);
+  const tmp = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const center = startMid.clone().lerp(endMid, t);
+    // Interpolate half-width, then rotate that arm about the axis by the
+    // running twist — each span is rotated a little more than the last.
+    const arm = startArm.clone().lerp(endArm, t);
+    q.setFromAxisAngle(axis, twist * t);
+    arm.applyQuaternion(q);
+
+    tmp.copy(center).sub(arm);
+    pos.setXYZ(i * 2, tmp.x, tmp.y, tmp.z);
+    linePos.setXYZ(i * 2, tmp.x, tmp.y, tmp.z);
+
+    tmp.copy(center).add(arm);
+    pos.setXYZ(i * 2 + 1, tmp.x, tmp.y, tmp.z);
+    linePos.setXYZ(i * 2 + 1, tmp.x, tmp.y, tmp.z);
   }
+
   pos.needsUpdate = true;
   linePos.needsUpdate = true;
   box3D.geom.computeVertexNormals();
+  box3D.geom.computeBoundingSphere();
   box3D.mat.color.setStyle(settings.frameColor);
   box3D.mat.opacity = settings.opacity * 0.55;
   box3D.lineMat.color.setStyle(settings.frameColor);
@@ -957,12 +1054,34 @@ function render3D(handRes) {
   if (twoHands && settings.showOutline) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
+
+    // Roll of each hand (thumb→index tip), differenced to get relative rotation.
+    // atan2 wraps at ±180°, so unwrap it into a running turn count — otherwise
+    // the ribbon would snap back the moment you passed a half-turn.
+    const rollOf = h => {
+      const a = h[4], b = h[8];
+      return Math.atan2(b.y - a.y, b.x - a.x);
+    };
+    const rel = rollOf(hands[1]) - rollOf(hands[0]);
+    if (lastRollAngle !== null) {
+      let d = rel - lastRollAngle;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      twistTurns += d / (Math.PI * 2);
+      twistTurns = Math.max(-3, Math.min(3, twistTurns)); // cap so it can't wind up forever
+    }
+    lastRollAngle = rel;
+
     const quad = buildQuad(tips);
     poly = smoothCorners(scalePolygon(quad, settings.frameScale));
     updateBox3D(poly);
   } else {
     box3D.group.visible = false;
-    if (!twoHands) smoothedCorners = null;
+    if (!twoHands) {
+      smoothedCorners = null;
+      lastRollAngle = null;
+      twistTurns = 0;
+    }
   }
 
   threeRenderer.render(threeScene, threeCamera);
@@ -1430,6 +1549,7 @@ function bindControls() {
     $('effectRow').classList.toggle('disabled', is3d);
     $('blendRow').classList.toggle('disabled', is3d || !BLEND_STYLES.includes(settings.effectStyle));
     $('pixelRow').classList.toggle('disabled', is3d || !PIXELATED_STYLES.includes(settings.effectStyle));
+    $('twistRow').classList.toggle('disabled', !is3d);
   };
 
   const syncSheetState = () => {
@@ -1506,6 +1626,10 @@ function bindControls() {
     settings.frameScale = parseInt(e.target.value, 10) / 100;
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
   });
+  $('twistAmount').addEventListener('input', e => {
+    settings.twistAmount = parseInt(e.target.value, 10) / 100;
+    $('twistVal').textContent = settings.twistAmount.toFixed(2);
+  });
   $('skeletonMode').addEventListener('change', e => settings.skeletonMode = e.target.value);
   $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
   $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
@@ -1530,6 +1654,9 @@ function bindControls() {
     $('smoothVal').textContent = settings.smoothing.toFixed(2);
     $('frameScale').value = settings.frameScale * 100;
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
+    $('twistAmount').value = settings.twistAmount * 100;
+    $('twistVal').textContent = settings.twistAmount.toFixed(2);
+    twistTurns = 0; lastRollAngle = null;
     $('skeletonMode').value = settings.skeletonMode;
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
