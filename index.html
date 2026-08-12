@@ -352,6 +352,7 @@ import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@m
 
 const video   = document.getElementById('video');
 const canvas  = document.getElementById('canvas');
+const stageEl = document.getElementById('stage');
 const ctx     = canvas.getContext('2d');
 const hud     = document.getElementById('hud');
 const dataOut = document.getElementById('dataOut');
@@ -429,6 +430,18 @@ let threeRenderer, threeScene, threeCamera, threeCanvas;
 let handGroups3D = [];
 let box3D = null; // { group, geom, mat, lineGeom, lineMat }
 const SCENE_W = 4, Z_SCALE = 9;
+const CAM_FOV_DEG = 45, CONTENT_MARGIN = 1.35;
+
+// Canvas resolution now tracks the actual screen (portrait iPhone, landscape
+// desktop, either orientation on iPad) instead of the camera's native buffer.
+// videoAspect stays fixed at whatever the camera stream negotiated, and
+// coverTransform crops the video source to match the screen without
+// distortion — same idea as CSS object-fit:cover, done manually so hand
+// landmarks (normalized to the raw video frame) can be mapped through the
+// identical crop and stay aligned with what's drawn.
+let videoAspect = 16 / 9;
+let coverTransform = { offsetX: 0, offsetY: 0, srcW: 0, srcH: 0 };
+let resizeTimer = null;
 
 function hexToRgba(hex, a) {
   const v = hex.replace('#', '');
@@ -456,8 +469,9 @@ async function init() {
 
   await new Promise(res => { video.onloadedmetadata = res; });
   await video.play();
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
+  videoAspect = video.videoWidth / video.videoHeight || 16 / 9;
+
+  resizeCanvasToDisplay(); // sizes canvas to the actual screen, not the camera's native resolution
 
   fxCanvas = document.createElement('canvas');
   fxCanvas.width  = canvas.width;
@@ -468,9 +482,66 @@ async function init() {
   maskCtx = maskLow.getContext('2d');
   resizeMask();
 
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resizeCanvasToDisplay, 150);
+  });
+  if (window.screen && screen.orientation) {
+    screen.orientation.addEventListener('change', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(resizeCanvasToDisplay, 150);
+    });
+  }
+
   bindControls();
   setupRecording();
   requestAnimationFrame(loop);
+}
+
+// Crops the video source to match the canvas's aspect ratio (whatever shape
+// the current screen is), the same behavior CSS object-fit:cover gives —
+// done manually here so drawImage and landmark coordinates use the same math.
+function updateCoverTransform() {
+  const cAspect = canvas.width / canvas.height;
+  if (videoAspect > cAspect) {
+    coverTransform.srcH = video.videoHeight;
+    coverTransform.srcW = coverTransform.srcH * cAspect;
+    coverTransform.offsetX = (video.videoWidth - coverTransform.srcW) / 2;
+    coverTransform.offsetY = 0;
+  } else {
+    coverTransform.srcW = video.videoWidth;
+    coverTransform.srcH = coverTransform.srcW / cAspect;
+    coverTransform.offsetY = (video.videoHeight - coverTransform.srcH) / 2;
+    coverTransform.offsetX = 0;
+  }
+}
+
+// Matches canvas pixel resolution to the actual on-screen size (capped DPR for
+// perf), so it's correct whether that's a tall iPhone, an iPad in either
+// orientation, or a resizable desktop window — then keeps every dependent
+// buffer and the 3D camera in sync.
+function resizeCanvasToDisplay() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(2, Math.round(stageEl.clientWidth * dpr));
+  const h = Math.max(2, Math.round(stageEl.clientHeight * dpr));
+  if (canvas.width === w && canvas.height === h) return;
+
+  canvas.width = w;
+  canvas.height = h;
+  updateCoverTransform();
+
+  if (fxCanvas) {
+    fxCanvas.width = w;
+    fxCanvas.height = h;
+  }
+  resizeMask();
+
+  if (threeRenderer) {
+    threeRenderer.setSize(w, h, false);
+    threeCanvas.width = w;
+    threeCanvas.height = h;
+    updateCameraFraming();
+  }
 }
 
 function resizeMask() {
@@ -597,9 +668,8 @@ function initThreeScene() {
   threeScene.background = new THREE.Color(0x0a0f0c);
   threeScene.fog = new THREE.Fog(0x0a0f0c, 3, 9);
 
-  threeCamera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.05, 50);
-  threeCamera.position.set(0, 0.55, 2.6); // fixed — does not move on its own
-  threeCamera.lookAt(0, -0.1, 0);
+  threeCamera = new THREE.PerspectiveCamera(CAM_FOV_DEG, canvas.width / canvas.height, 0.05, 50);
+  updateCameraFraming(); // sets a static but aspect-correct position — still doesn't move on its own
 
   const grid = new THREE.GridHelper(8, 20, 0x2a4a35, 0x162019);
   grid.position.y = -1.4;
@@ -626,11 +696,30 @@ function initThreeScene() {
 }
 
 function pxToScene(p) {
-  const sceneH = SCENE_W * canvas.height / canvas.width;
+  const sceneH = SCENE_W / videoAspect; // stable, camera-stream aspect — not the screen's
   const mirrorSign = settings.mirror ? -1 : 1;
   const nx = (p.x / canvas.width - 0.5) * mirrorSign;
   const ny = (p.y / canvas.height - 0.5);
   return new THREE.Vector3(nx * SCENE_W, -ny * sceneH, -(p.z || 0) * Z_SCALE);
+}
+
+// Content (hands + box) is a fixed-size world-space region; this picks the
+// camera distance so that fixed region always fits the visible frustum,
+// whatever the screen's aspect is — this is what actually fixes the iPhone
+// "shrunk" bug, rather than pre-scaling content by the screen's aspect.
+function updateCameraFraming() {
+  if (!threeCamera) return;
+  const aspect = canvas.width / canvas.height;
+  threeCamera.aspect = aspect;
+
+  const halfW = (SCENE_W / 2) * CONTENT_MARGIN;
+  const halfH = (SCENE_W / videoAspect / 2) * CONTENT_MARGIN;
+  const fovRad = CAM_FOV_DEG * Math.PI / 180;
+  const dist = Math.max(halfH, halfW / aspect) / Math.tan(fovRad / 2);
+
+  threeCamera.position.set(0, dist * 0.21, dist);
+  threeCamera.lookAt(0, -0.05, 0);
+  threeCamera.updateProjectionMatrix();
 }
 
 function updateHandGroup3D(idx, landmarksPx, color) {
@@ -683,6 +772,19 @@ function roundRectPath(c, x, y, w, h, r) {
 // Burned into the canvas itself so it's part of the recorded video, not just an
 // on-screen overlay. Only appears while actively recording. Drawn in a reset
 // transform so it stays upright and un-mirrored regardless of view mode.
+// Position cycles through the four corners on a timer, sliding between them
+// with easing (plus a small landing pop) — same idea as a downloaded TikTok watermark.
+const WM_CORNERS = [
+  (bw, bh, inset) => ({ x: canvas.width - bw - inset, y: canvas.height - bh - inset }), // bottom-right
+  (bw, bh, inset) => ({ x: inset, y: inset }),                                          // top-left
+  (bw, bh, inset) => ({ x: canvas.width - bw - inset, y: inset }),                       // top-right
+  (bw, bh, inset) => ({ x: inset, y: canvas.height - bh - inset }),                      // bottom-left
+];
+const WM_SLOT_MS = 3400;
+const WM_TRANS_MS = 650;
+
+function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
 function drawWatermark() {
   if (!isRecording) return;
   const line1 = 'berkisodd.github.io/handmesh';
@@ -700,8 +802,31 @@ function drawWatermark() {
   const pad = 10;
   const boxW = Math.max(w1, w2) + pad * 2;
   const boxH = 40;
-  const x = canvas.width - boxW - 14;
-  const y = canvas.height - boxH - 14;
+  const inset = 14;
+
+  const elapsed = performance.now() - recordingStartTime;
+  const slot = Math.floor(elapsed / WM_SLOT_MS);
+  const into = elapsed % WM_SLOT_MS;
+  const posA = WM_CORNERS[slot % WM_CORNERS.length](boxW, boxH, inset);
+  const posB = WM_CORNERS[(slot + 1) % WM_CORNERS.length](boxW, boxH, inset);
+
+  let t = 0;
+  if (into > WM_SLOT_MS - WM_TRANS_MS) {
+    t = easeInOutCubic((into - (WM_SLOT_MS - WM_TRANS_MS)) / WM_TRANS_MS);
+  }
+  const x = posA.x + (posB.x - posA.x) * t;
+  const y = posA.y + (posB.y - posA.y) * t + Math.sin(elapsed / 450) * 2; // subtle idle bob
+
+  // brief landing pop right after arriving at a new corner
+  let scale = 1;
+  if (into < 250) {
+    const p = 1 - into / 250;
+    scale = 1 + 0.12 * p * Math.sin(p * Math.PI);
+  }
+  const cx = x + boxW / 2, cy = y + boxH / 2;
+  ctx.translate(cx, cy);
+  ctx.scale(scale, scale);
+  ctx.translate(-cx, -cy);
 
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   roundRectPath(ctx, x, y, boxW, boxH, 8);
@@ -786,7 +911,18 @@ function loop(ts) {
   requestAnimationFrame(loop);
 }
 
-const toPx = lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
+// Landmarks are normalized 0..1 against the full video frame — route them
+// through the same crop used to draw the video so dots land exactly on the
+// visible (cropped) image instead of drifting on non-16:9 screens.
+const toPx = lm => {
+  const vx = lm.x * video.videoWidth;
+  const vy = lm.y * video.videoHeight;
+  return {
+    x: (vx - coverTransform.offsetX) / coverTransform.srcW * canvas.width,
+    y: (vy - coverTransform.offsetY) / coverTransform.srcH * canvas.height,
+    z: lm.z
+  };
+};
 
 function buildQuad(tipPoints) {
   const cx = tipPoints.reduce((s, p) => s + p.x, 0) / tipPoints.length;
@@ -931,7 +1067,11 @@ function drawFrameEffect(poly) {
 
     if (settings.effectStyle === 'invert') {
       fxCtx.filter = 'invert(1) saturate(1.4)';
-      fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
+      fxCtx.drawImage(
+        video,
+        coverTransform.offsetX, coverTransform.offsetY, coverTransform.srcW, coverTransform.srcH,
+        0, 0, fxCanvas.width, fxCanvas.height
+      );
       fxCtx.filter = 'none';
       fxCtx.globalCompositeOperation = settings.blendMode;
       fxCtx.fillStyle = tint;
@@ -941,7 +1081,11 @@ function drawFrameEffect(poly) {
       fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
     } else if (settings.effectStyle === 'cycle') {
       fxCtx.filter = `invert(1) hue-rotate(${(performance.now() / 15) % 360}deg) saturate(2)`;
-      fxCtx.drawImage(video, 0, 0, fxCanvas.width, fxCanvas.height);
+      fxCtx.drawImage(
+        video,
+        coverTransform.offsetX, coverTransform.offsetY, coverTransform.srcW, coverTransform.srcH,
+        0, 0, fxCanvas.width, fxCanvas.height
+      );
       fxCtx.filter = 'none';
       fxCtx.globalCompositeOperation = settings.blendMode;
       fxCtx.fillStyle = hexToRgba(settings.frameColor, settings.opacity * 0.6);
@@ -1000,7 +1144,11 @@ function renderCamera(handRes) {
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
   }
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(
+    video,
+    coverTransform.offsetX, coverTransform.offsetY, coverTransform.srcW, coverTransform.srcH,
+    0, 0, canvas.width, canvas.height
+  );
 
   const raw = handRes.landmarks || [];
   const handedRaw = handRes.handednesses || handRes.handedness || [];
