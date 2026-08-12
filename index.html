@@ -6,46 +6,71 @@
 <title>Hand Frame Effect</title>
 <style>
   html, body { margin:0; padding:0; background:#000; overflow:hidden; height:100%;
-    font-family: -apple-system, system-ui, sans-serif; }
-  #stage { position:relative; width:100vw; height:100vh; }
+    font-family: -apple-system, system-ui, sans-serif;
+    overscroll-behavior:none; -webkit-text-size-adjust:100%; }
+  /* 100vh on iOS Safari includes the address bar, pushing bottom controls
+     off-screen. dvh tracks the actually-visible viewport; vh stays as fallback. */
+  #stage { position:relative; width:100%; height:100vh; height:100dvh; overflow:hidden; }
   video { display:none; }
   canvas {
     position:absolute; top:0; left:0; width:100%; height:100%;
     object-fit:cover;
   }
+
+  /* Single flex row for the top bar so HUD / timer / buttons can never overlap
+     on narrow screens — previously all three were absolutely positioned and
+     collided on an iPhone. */
+  #topBar {
+    position:absolute; top:0; left:0; right:0; z-index:6;
+    display:flex; align-items:flex-start; gap:8px;
+    padding:calc(10px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right))
+            10px calc(10px + env(safe-area-inset-left));
+    pointer-events:none;
+  }
+  #topBar > * { pointer-events:auto; }
   #hud {
-    position:absolute; top:14px; left:14px; z-index:5;
     color:#7CFF9E; background:rgba(0,0,0,0.55); border:1px solid rgba(124,255,158,0.4);
-    padding:6px 12px; border-radius:8px; font-size:13px; letter-spacing:0.02em;
-    pointer-events:none; white-space:nowrap;
+    padding:6px 10px; border-radius:8px; font-size:12px; letter-spacing:0.02em;
+    pointer-events:none;
+    min-width:0; flex:1 1 auto;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   #recordIndicator {
-    position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:5;
-    display:none; align-items:center; gap:8px;
+    display:none; align-items:center; gap:6px; flex:0 0 auto;
     color:#FF4444; background:rgba(0,0,0,0.55); border:1px solid rgba(255,68,68,0.4);
-    padding:6px 12px; border-radius:8px; font-size:13px; font-weight:600;
+    padding:6px 10px; border-radius:8px; font-size:12px; font-weight:600;
+    white-space:nowrap;
   }
   #recordIndicator.active { display:flex; }
-  .record-dot { width:8px; height:8px; background:#FF4444; border-radius:50%; animation: pulse 1s infinite; }
+  #recordIndicator.warn { color:#FFD24A; border-color:rgba(255,210,74,0.5); }
+  #recordIndicator.warn .record-dot { background:#FFD24A; }
+  #micStatus { font-size:12px; opacity:0.85; }
+  .record-dot { width:8px; height:8px; background:#FF4444; border-radius:50%; animation: pulse 1s infinite; flex:0 0 auto; }
   @keyframes pulse { 0%, 100% { opacity:1; } 50% { opacity:0.4; } }
 
-  #toolbar { position:absolute; top:14px; right:14px; z-index:6; display:flex; gap:8px; }
+  #toolbar { display:flex; gap:6px; flex:0 0 auto; }
   #toolbar button {
     background:rgba(0,0,0,0.55); color:#7CFF9E; border:1px solid rgba(124,255,158,0.4);
-    border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600;
+    border-radius:8px; padding:7px 10px; font-size:12px; font-weight:600;
+    white-space:nowrap; -webkit-tap-highlight-color:transparent;
+  }
+  /* On narrow phones drop the button labels to icons so the row always fits */
+  @media (max-width: 430px) {
+    #toolbar button .btn-label { display:none; }
+    #toolbar button { padding:7px 9px; }
   }
 
   #recordBtn {
-    position:fixed; left:50%; bottom:calc(26px + env(safe-area-inset-bottom));
+    position:absolute; left:50%; bottom:calc(22px + env(safe-area-inset-bottom));
     transform:translateX(-50%); z-index:8;
-    width:72px; height:72px; border-radius:50%;
+    width:70px; height:70px; border-radius:50%;
     background:rgba(0,0,0,0.3); border:4px solid rgba(255,255,255,0.9);
     display:flex; align-items:center; justify-content:center; padding:0;
     -webkit-tap-highlight-color:transparent;
   }
   #recordBtn:active { background:rgba(0,0,0,0.5); }
   #recordBtnInner {
-    width:56px; height:56px; border-radius:50%; background:#FF3B30;
+    width:54px; height:54px; border-radius:50%; background:#FF3B30;
     transition: width .18s ease, height .18s ease, border-radius .18s ease;
   }
   #recordBtn.recording { border-color:#FF3B30; }
@@ -54,8 +79,10 @@
   #recordBtn.unsupported #recordBtnInner { background:#888; }
 
   #viewModeBtn {
-    position:fixed; left:calc(50% - 68px); bottom:calc(37px + env(safe-area-inset-bottom));
-    transform:translateX(-50%); z-index:8;
+    position:absolute; left:50%; bottom:calc(32px + env(safe-area-inset-bottom));
+    /* single transform handles both centering and the sideways offset —
+       the old calc()+translateX combo double-shifted it */
+    transform:translateX(calc(-50% - 66px)); z-index:8;
     width:50px; height:50px; border-radius:50%;
     background:rgba(0,0,0,0.45); border:2px solid rgba(124,255,158,0.5);
     display:flex; align-items:center; justify-content:center; padding:0; color:#7CFF9E;
@@ -64,36 +91,48 @@
   #viewModeBtn.active { background:rgba(70,255,130,0.28); border-color:#46FF82; color:#EAFFF1; }
   #viewModeBtn:disabled { opacity:0.4; }
 
+  /* Sheets cover the bottom of the screen; fade the shutter row out so it
+     isn't stranded behind the panel or tappable through it. */
+  body.sheet-open #recordBtn,
+  body.sheet-open #viewModeBtn {
+    opacity:0; pointer-events:none; transition:opacity .2s ease;
+  }
+
   .sheet {
-    position:fixed; left:0; right:0; bottom:0; max-height:50vh; overflow-y:auto;
+    position:absolute; left:0; right:0; bottom:0;
+    max-height:min(56dvh, 420px); overflow-y:auto; -webkit-overflow-scrolling:touch;
     background:rgba(9,13,11,0.92); backdrop-filter: blur(12px);
     border-top:1px solid rgba(124,255,158,0.35); border-radius:18px 18px 0 0;
-    padding:10px 18px calc(20px + env(safe-area-inset-bottom));
+    padding:10px calc(18px + env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom))
+            calc(18px + env(safe-area-inset-left));
     transform:translateY(105%); transition: transform .25s ease; z-index:10;
-    box-sizing:border-box;
+    box-sizing:border-box; overscroll-behavior:contain;
   }
   .sheet.open { transform:translateY(0); }
   .sheet-handle { width:36px; height:4px; border-radius:2px; background:rgba(124,255,158,0.4); margin:8px auto 14px; }
-  .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; color:#CDEFD9; font-size:14px; transition:opacity .15s; }
-  .row > label:first-child { flex-shrink:0; opacity:0.85; }
-  .row select { flex:1; max-width:180px; }
-  .row input[type=range] { flex:1; accent-color:#46FF82; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; color:#CDEFD9; font-size:14px; transition:opacity .15s; flex-wrap:wrap; }
+  .row > label:first-child { flex:0 1 auto; min-width:0; opacity:0.85; }
+  .row select { flex:1 1 130px; min-width:0; max-width:180px; }
+  .row input[type=range] { flex:1 1 120px; min-width:100px; accent-color:#46FF82; }
   .row.disabled { opacity:0.32; pointer-events:none; }
   select {
     background:rgba(255,255,255,0.08); color:#EAFFF1; border:1px solid rgba(124,255,158,0.3);
-    border-radius:6px; padding:5px 8px; font-size:13px;
+    border-radius:6px; padding:7px 8px;
+    font-size:16px; /* iOS zooms the page if a focused control is under 16px */
+    max-width:100%;
   }
-  input[type=color] { width:44px; height:28px; border:none; background:none; padding:0; border-radius:6px; }
-  input[type=checkbox] { accent-color:#46FF82; width:16px; height:16px; }
-  .toggles { flex-direction:column; align-items:flex-start; gap:10px; }
+  input[type=color] { width:44px; height:30px; border:none; background:none; padding:0; border-radius:6px; flex:0 0 auto; }
+  input[type=checkbox] { accent-color:#46FF82; width:18px; height:18px; flex:0 0 auto; }
+  .toggles { flex-direction:column; align-items:flex-start; gap:12px; }
   .toggles label { display:flex; align-items:center; gap:8px; }
   #resetBtn {
     width:100%; background:rgba(255,255,255,0.06); color:#7CFF9E;
-    border:1px solid rgba(124,255,158,0.35); border-radius:8px; padding:9px; font-size:13px; margin-top:2px;
+    border:1px solid rgba(124,255,158,0.35); border-radius:8px; padding:11px; font-size:14px; margin-top:2px;
   }
   #dataOut {
     color:#7CFF9E; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size:11px; line-height:1.55; white-space:pre; margin:0;
+    font-size:10.5px; line-height:1.5; margin:0;
+    white-space:pre; overflow-x:auto; -webkit-overflow-scrolling:touch;
   }
   .recording-info {
     background:rgba(255,68,68,0.1); border:1px solid rgba(255,68,68,0.3); border-radius:8px;
@@ -104,11 +143,11 @@
   .recording-info a:hover { text-decoration:underline; }
 
   #recordToast {
-    position:fixed; left:50%; bottom:calc(122px + env(safe-area-inset-bottom));
+    position:absolute; left:50%; bottom:calc(112px + env(safe-area-inset-bottom));
     transform:translateX(-50%) translateY(10px);
-    width:min(300px, calc(100vw - 40px));
+    width:min(320px, calc(100% - 32px));
     background:rgba(8,14,11,0.96); border:1px solid rgba(70,255,130,0.55);
-    border-radius:14px; padding:14px 16px; z-index:14;
+    border-radius:14px; padding:14px 16px; z-index:14; box-sizing:border-box;
     box-shadow:0 10px 28px rgba(0,0,0,0.55);
     opacity:0; pointer-events:none; transition: opacity .25s ease, transform .25s ease;
   }
@@ -126,13 +165,15 @@
 
   /* ---------------- onboarding walkthrough ---------------- */
   .onboard-overlay {
-    position:fixed; inset:0; z-index:50; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px);
+    position:absolute; inset:0; z-index:50; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px);
     display:flex; align-items:center; justify-content:center;
+    padding:calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+    box-sizing:border-box; overflow-y:auto; -webkit-overflow-scrolling:touch;
     opacity:0; pointer-events:none; transition:opacity .25s ease;
   }
   .onboard-overlay.show { opacity:1; pointer-events:auto; }
   .onboard-card {
-    position:relative; width:min(340px, calc(100vw - 48px));
+    position:relative; width:min(340px, 100%); max-height:100%; overflow-y:auto;
     background:rgba(9,13,11,0.97); border:1px solid rgba(124,255,158,0.35); border-radius:18px;
     padding:22px 22px 20px; box-sizing:border-box; box-shadow:0 20px 50px rgba(0,0,0,0.5);
   }
@@ -140,7 +181,7 @@
     position:absolute; top:12px; right:14px; background:none; border:none;
     color:#7CFF9E; font-size:13px; opacity:0.75; padding:4px; -webkit-tap-highlight-color:transparent;
   }
-  .ob-visual-wrap { height:110px; display:flex; align-items:center; justify-content:center; position:relative; perspective:400px; }
+  .ob-visual-wrap { height:100px; flex:0 0 auto; display:flex; align-items:center; justify-content:center; position:relative; perspective:400px; }
   .ob-visual { position:absolute; display:none; align-items:center; justify-content:center; width:100%; height:100%; }
   .ob-visual.active { display:flex; }
   #onboardTitle { color:#EAFFF1; font-size:17px; font-weight:700; margin:10px 0 6px; text-align:center; }
@@ -150,8 +191,9 @@
   .onboard-dots span.active { background:#46FF82; }
   .onboard-actions { display:flex; justify-content:space-between; align-items:center; gap:10px; }
   .onboard-actions button {
-    flex:1; padding:11px; border-radius:10px; font-size:14px; font-weight:600;
+    flex:1; padding:13px; border-radius:10px; font-size:15px; font-weight:600;
     border:1px solid rgba(124,255,158,0.35); background:rgba(255,255,255,0.06); color:#7CFF9E;
+    -webkit-tap-highlight-color:transparent;
   }
   #onboardNext { background:#46FF82; color:#06210F; border:none; }
   #onboardBack:disabled { visibility:hidden; }
@@ -182,17 +224,20 @@
 <div id="stage">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div id="hud">loading hand tracking…</div>
+  <div id="topBar">
+    <div id="hud">loading hand tracking…</div>
 
-  <div id="recordIndicator">
-    <div class="record-dot"></div>
-    <span id="recordTimer">0:00</span>
-  </div>
+    <div id="recordIndicator">
+      <div class="record-dot"></div>
+      <span id="recordTimer">0:00</span>
+      <span id="micStatus" title="Microphone"></span>
+    </div>
 
-  <div id="toolbar">
-    <button id="helpBtn">?</button>
-    <button id="styleToggle">⚙ Style</button>
-    <button id="dataToggle">{ } Data</button>
+    <div id="toolbar">
+      <button id="helpBtn" aria-label="Help">?</button>
+      <button id="styleToggle" aria-label="Style">⚙<span class="btn-label"> Style</span></button>
+      <button id="dataToggle" aria-label="Data">{ }<span class="btn-label"> Data</span></button>
+    </div>
   </div>
 
   <div id="recordToast">
@@ -240,6 +285,9 @@
         <option value="invert">Invert + tint</option>
         <option value="solid">Solid fill</option>
         <option value="cycle">Color cycle</option>
+        <option value="glow">Glow pulse</option>
+        <option value="particles">Particles</option>
+        <option value="scan">Scanline</option>
         <option value="outline">Outline only</option>
       </select>
     </div>
@@ -277,6 +325,7 @@
       </select>
     </div>
     <div class="row toggles">
+      <label><input type="checkbox" id="includeAudio" checked> Include microphone audio</label>
       <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
       <label><input type="checkbox" id="showOutline" checked> Show frame outline / box</label>
       <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
@@ -367,6 +416,7 @@ const recordToast = document.getElementById('recordToast');
 const toastClose = document.getElementById('toastClose');
 const toastDownload = document.getElementById('toastDownload');
 const toastSub = document.getElementById('toastSub');
+const micStatus = document.getElementById('micStatus');
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -407,6 +457,8 @@ const settings = { ...DEFAULTS };
 let handLandmarker;
 let fxCanvas, fxCtx, maskLow, maskCtx;
 let smoothedCorners = null;
+let particles = [];
+const MAX_PARTICLES = 70;
 
 // --- recording ---
 let mediaRecorder = null;
@@ -414,6 +466,10 @@ let recordingChunks = [];
 let isRecording = false;
 let recordingStartTime = 0;
 let recordMimeType = null;
+let cameraStream = null;
+let hasAudio = false;
+let stopReason = 'manual';
+const MAX_RECORD_MS = 60000;
 
 const MIME_CANDIDATES = [
   'video/mp4;codecs=avc1',
@@ -462,9 +518,15 @@ async function init() {
   });
 
   hud.textContent = "requesting camera…";
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }
-  });
+  const videoConstraints = { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" };
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: true });
+  } catch (err) {
+    console.warn('Mic unavailable, falling back to video-only:', err);
+    stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+  }
+  cameraStream = stream;
   video.srcObject = stream;
 
   await new Promise(res => { video.onloadedmetadata = res; });
@@ -486,6 +548,14 @@ async function init() {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(resizeCanvasToDisplay, 150);
   });
+  // iOS collapses/expands the address bar without firing a window resize;
+  // visualViewport does report it, so the canvas stays correctly sized.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(resizeCanvasToDisplay, 150);
+    });
+  }
   if (window.screen && screen.orientation) {
     screen.orientation.addEventListener('change', () => {
       clearTimeout(resizeTimer);
@@ -562,13 +632,19 @@ function setupRecording() {
     return;
   }
   try {
-    const stream = canvas.captureStream(30); // same visible canvas in both modes, so recording works regardless of view
-    mediaRecorder = new MediaRecorder(stream, { mimeType: recordMimeType });
+    const canvasStream = canvas.captureStream(30); // same visible canvas in both modes, so recording works regardless of view
+    const audioTracks = cameraStream ? cameraStream.getAudioTracks() : [];
+    hasAudio = audioTracks.length > 0;
+    const recordStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
+    mediaRecorder = new MediaRecorder(recordStream, { mimeType: recordMimeType });
   } catch (err) {
     console.warn('MediaRecorder init failed:', err);
     disableRecording('Recording failed to initialize');
     return;
   }
+
+  micStatus.textContent = hasAudio ? '🎤' : '🔇';
+  micStatus.title = hasAudio ? 'Microphone audio included' : 'No microphone audio (denied or unavailable)';
 
   mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordingChunks.push(e.data); };
   mediaRecorder.onstop = () => {
@@ -579,17 +655,18 @@ function setupRecording() {
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
     const filename = `hand-frame-${timestamp}.${ext}`;
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+    const limitNote = stopReason === 'limit' ? ' \u00B7 hit the 60s limit' : '';
 
     // Panel entry (Style sheet) — kept as a fallback if the toast gets dismissed
     downloadLink.href = url;
     downloadLink.download = filename;
     recordingAlert.style.display = 'block';
-    recordMsg.textContent = `Recording saved (${sizeMB} MB)`;
+    recordMsg.textContent = `Recording saved (${sizeMB} MB)${limitNote}`;
 
     // Prominent on-screen toast — shown immediately so it's impossible to miss
     toastDownload.href = url;
     toastDownload.download = filename;
-    toastSub.textContent = `${sizeMB} MB \u00B7 tap below to save it`;
+    toastSub.textContent = `${sizeMB} MB${limitNote} \u00B7 tap below to save it`;
     recordToast.classList.add('show');
   };
 }
@@ -604,27 +681,47 @@ function disableRecording(reason) {
   recordBtn.disabled = true;
 }
 
-recordBtn.addEventListener('click', () => {
-  if (!mediaRecorder) return;
+function startRecording() {
+  if (!mediaRecorder || isRecording) return;
   try {
-    if (!isRecording) {
-      recordingChunks = [];
-      recordingAlert.style.display = 'none';
-      hideToast();
-      recordingStartTime = performance.now();
-      mediaRecorder.start();
-      isRecording = true;
-      recordBtn.classList.add('recording');
-      recordIndicator.classList.add('active');
-    } else {
-      mediaRecorder.stop();
-      isRecording = false;
-      recordBtn.classList.remove('recording');
-      recordIndicator.classList.remove('active');
-    }
+    recordingChunks = [];
+    recordingAlert.style.display = 'none';
+    hideToast();
+    stopReason = 'manual';
+    recordingStartTime = performance.now();
+    mediaRecorder.start();
+    isRecording = true;
+    recordBtn.classList.add('recording');
+    recordIndicator.classList.add('active');
+    recordIndicator.classList.remove('warn');
   } catch (err) {
-    console.warn('Recording toggle failed:', err);
+    console.warn('Recording start failed:', err);
   }
+}
+
+function stopRecording(reason) {
+  if (!mediaRecorder || !isRecording) return;
+  try {
+    stopReason = reason || 'manual';
+    mediaRecorder.stop();
+    isRecording = false;
+    recordBtn.classList.remove('recording');
+    recordIndicator.classList.remove('active', 'warn');
+  } catch (err) {
+    console.warn('Recording stop failed:', err);
+  }
+}
+
+recordBtn.addEventListener('click', () => {
+  if (isRecording) stopRecording('manual');
+  else startRecording();
+});
+
+document.getElementById('includeAudio').addEventListener('change', e => {
+  if (!cameraStream) return;
+  cameraStream.getAudioTracks().forEach(t => { t.enabled = e.target.checked; });
+  const on = e.target.checked && cameraStream.getAudioTracks().length > 0;
+  micStatus.textContent = on ? '🎤' : '🔇';
 });
 
 /* ---------------- 3D data viewport ---------------- */
@@ -877,9 +974,10 @@ function render3D(handRes) {
   ctx.drawImage(threeCanvas, 0, 0, canvas.width, canvas.height);
   drawWatermark();
 
+  const narrow3d = window.innerWidth < 430;
   hud.textContent = hands.length === 0
-    ? "3D data view \u00B7 show your hands"
-    : `3D data view \u00B7 ${hands.length} hand${hands.length > 1 ? 's' : ''} tracked`;
+    ? (narrow3d ? "3D \u00B7 show hands" : "3D data view \u00B7 show your hands")
+    : `${narrow3d ? '3D' : '3D data view'} \u00B7 ${hands.length} hand${hands.length > 1 ? 's' : ''}`;
 
   updateDataPanel(hands, handedness, poly, 0);
 }
@@ -896,8 +994,15 @@ function loop(ts) {
   if (dt > 0) fps = fps ? fps * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
 
   if (isRecording) {
-    const elapsed = Math.floor((performance.now() - recordingStartTime) / 1000);
+    const elapsedMs = performance.now() - recordingStartTime;
+    const elapsed = Math.floor(elapsedMs / 1000);
     recordTimer.textContent = `${Math.floor(elapsed / 60)}:${(elapsed % 60).toString().padStart(2, '0')}`;
+    if (elapsedMs >= MAX_RECORD_MS - 5000 && elapsedMs < MAX_RECORD_MS) {
+      recordIndicator.classList.add('warn');
+    }
+    if (elapsedMs >= MAX_RECORD_MS) {
+      stopRecording('limit');
+    }
   }
 
   if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
@@ -1054,7 +1159,130 @@ function drawFlatOutline(poly) {
   ctx.stroke();
 }
 
+function fillDimInterior(poly, alpha) {
+  buildLowResMask(poly);
+  fxCtx.save();
+  fxCtx.setTransform(1, 0, 0, 1, 0, 0);
+  fxCtx.globalCompositeOperation = 'source-over';
+  fxCtx.filter = 'none';
+  fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.fillStyle = hexToRgba(settings.frameColor, alpha);
+  fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.globalCompositeOperation = 'destination-in';
+  fxCtx.imageSmoothingEnabled = false;
+  fxCtx.drawImage(maskLow, 0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.restore();
+  ctx.drawImage(fxCanvas, 0, 0);
+}
+
+// Pulsing dim fill + a glowing outline that bleeds outside the box via shadowBlur
+// (deliberately not clipped/pixelated — glow needs to extend past the edge).
+function drawGlowEffect(poly) {
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 700);
+  fillDimInterior(poly, settings.opacity * 0.28 * (0.6 + 0.4 * pulse));
+
+  ctx.save();
+  ctx.shadowColor = settings.frameColor;
+  ctx.shadowBlur = 14 + 16 * pulse;
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
+  ctx.lineWidth = 2.5 + 1.5 * pulse;
+  tracePath(ctx, poly);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function spawnParticle(poly) {
+  const i = Math.floor(Math.random() * poly.length);
+  const a = poly[i], b = poly[(i + 1) % poly.length];
+  const u = Math.random();
+  const x = a.x + (b.x - a.x) * u;
+  const y = a.y + (b.y - a.y) * u;
+
+  const ex = b.x - a.x, ey = b.y - a.y;
+  const len = Math.hypot(ex, ey) || 1;
+  let nx = -ey / len, ny = ex / len;
+  const c = centroid(poly);
+  if ((x - c.x) * nx + (y - c.y) * ny < 0) { nx = -nx; ny = -ny; } // push outward, away from center
+
+  const speed = (18 + Math.random() * 26) / 60;
+  const jitter = (Math.random() - 0.5) * 0.6;
+  particles.push({
+    x, y,
+    vx: (nx + jitter) * speed,
+    vy: (ny + jitter) * speed,
+    life: 1,
+    decay: 0.012 + Math.random() * 0.012,
+    r: 1.5 + Math.random() * 2.2
+  });
+}
+
+// Thin base outline (so the shape always reads) plus sparks drifting outward
+// from the edges and fading — no pixelated fill, this one's meant to feel light.
+function drawParticleEffect(poly) {
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.35);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  for (let i = 0; i < 2 && particles.length < MAX_PARTICLES; i++) spawnParticle(poly);
+
+  ctx.save();
+  ctx.shadowColor = settings.frameColor;
+  ctx.shadowBlur = 8;
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.life -= p.decay;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    ctx.fillStyle = hexToRgba(settings.frameColor, settings.opacity * p.life);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Dim fill + a glowing horizontal line sweeping the box on a loop, clipped to
+// the actual quad shape so it doesn't spill past the corners.
+function drawScanEffect(poly) {
+  fillDimInterior(poly, settings.opacity * 0.18);
+
+  const ys = poly.map(p => p.y), xs = poly.map(p => p.x);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const lineY = top + (bottom - top) * ((performance.now() % 1600) / 1600);
+
+  ctx.save();
+  tracePath(ctx, poly);
+  ctx.clip();
+
+  const grad = ctx.createLinearGradient(0, lineY - 40, 0, lineY);
+  grad.addColorStop(0, hexToRgba(settings.frameColor, 0));
+  grad.addColorStop(1, hexToRgba(settings.frameColor, 0.5));
+  ctx.fillStyle = grad;
+  ctx.fillRect(left, lineY - 40, right - left, 40);
+
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.95);
+  ctx.lineWidth = 2;
+  ctx.shadowColor = settings.frameColor;
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(left, lineY);
+  ctx.lineTo(right, lineY);
+  ctx.stroke();
+  ctx.restore();
+
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.4);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
 function drawFrameEffect(poly) {
+  if (settings.effectStyle === 'glow') { drawGlowEffect(poly); return; }
+  if (settings.effectStyle === 'particles') { drawParticleEffect(poly); return; }
+  if (settings.effectStyle === 'scan') { drawScanEffect(poly); return; }
+
   const tint = hexToRgba(settings.frameColor, settings.opacity);
 
   if (settings.effectStyle !== 'outline') {
@@ -1169,6 +1397,7 @@ function renderCamera(handRes) {
     drawFrameEffect(poly);
   } else {
     smoothedCorners = null;
+    if (particles.length) particles = [];
   }
 
   if (settings.showSkeleton) {
@@ -1177,10 +1406,11 @@ function renderCamera(handRes) {
 
   drawWatermark();
 
+  const narrow = window.innerWidth < 430;
   hud.textContent = hands.length === 0
-    ? "show your hands to the camera"
-    : `${hands.length} hand${hands.length > 1 ? 's' : ''} tracked`
-      + (twoHands ? ` \u00B7 tilt ${tilt.toFixed(2)}` : " \u00B7 bring both hands in for the effect");
+    ? (narrow ? "show your hands" : "show your hands to the camera")
+    : `${hands.length} hand${hands.length > 1 ? 's' : ''}`
+      + (twoHands ? ` \u00B7 tilt ${tilt.toFixed(2)}` : (narrow ? " \u00B7 need both" : " \u00B7 bring both hands in for the effect"));
 
   updateDataPanel(hands, handedness, poly, tilt);
 }
@@ -1190,17 +1420,33 @@ function bindControls() {
   const stylePanel = $('stylePanel');
   const dataPanel  = $('dataPanel');
 
+  const PIXELATED_STYLES = ['invert', 'solid', 'cycle', 'glow', 'scan'];
+  const BLEND_STYLES = ['invert', 'cycle'];
+
   const syncControlAvailability = () => {
     const is3d = settings.viewMode === '3d';
     $('depthModeRow').classList.toggle('disabled', is3d);
     $('depthAmountRow').classList.toggle('disabled', is3d || settings.depthMode !== 'warp');
     $('effectRow').classList.toggle('disabled', is3d);
-    $('blendRow').classList.toggle('disabled', is3d);
-    $('pixelRow').classList.toggle('disabled', is3d);
+    $('blendRow').classList.toggle('disabled', is3d || !BLEND_STYLES.includes(settings.effectStyle));
+    $('pixelRow').classList.toggle('disabled', is3d || !PIXELATED_STYLES.includes(settings.effectStyle));
   };
 
-  $('styleToggle').onclick = () => { dataPanel.classList.remove('open'); stylePanel.classList.toggle('open'); };
-  $('dataToggle').onclick  = () => { stylePanel.classList.remove('open'); dataPanel.classList.toggle('open'); };
+  const syncSheetState = () => {
+    const anyOpen = stylePanel.classList.contains('open') || dataPanel.classList.contains('open');
+    document.body.classList.toggle('sheet-open', anyOpen);
+  };
+
+  $('styleToggle').onclick = () => {
+    dataPanel.classList.remove('open');
+    stylePanel.classList.toggle('open');
+    syncSheetState();
+  };
+  $('dataToggle').onclick  = () => {
+    stylePanel.classList.remove('open');
+    dataPanel.classList.toggle('open');
+    syncSheetState();
+  };
 
   viewModeBtn.addEventListener('click', async () => {
     if (settings.viewMode === 'camera') {
@@ -1237,7 +1483,11 @@ function bindControls() {
     $('depthVal').textContent = settings.depthAmount.toFixed(2);
   });
   $('frameColor').addEventListener('input', e => settings.frameColor = e.target.value);
-  $('effectStyle').addEventListener('change', e => settings.effectStyle = e.target.value);
+  $('effectStyle').addEventListener('change', e => {
+    settings.effectStyle = e.target.value;
+    if (settings.effectStyle !== 'particles') particles = [];
+    syncControlAvailability();
+  });
   $('blendMode').addEventListener('change', e => settings.blendMode = e.target.value);
   $('blockRes').addEventListener('input', e => {
     settings.blockRes = parseInt(e.target.value, 10);
@@ -1265,6 +1515,7 @@ function bindControls() {
     const keepViewMode = settings.viewMode; // don't force user back to camera mode on reset
     Object.assign(settings, DEFAULTS, { viewMode: keepViewMode });
     smoothedCorners = null;
+    particles = [];
     $('depthMode').value = settings.depthMode;
     $('depthAmount').value = settings.depthAmount * 100;
     $('depthVal').textContent = settings.depthAmount.toFixed(2);
@@ -1283,6 +1534,9 @@ function bindControls() {
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
+    $('includeAudio').checked = true;
+    if (cameraStream) cameraStream.getAudioTracks().forEach(t => { t.enabled = true; });
+    micStatus.textContent = hasAudio ? '🎤' : '🔇';
     syncControlAvailability();
     resizeMask();
   });
