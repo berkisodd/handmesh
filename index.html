@@ -11,7 +11,8 @@
   video { display:none; }
   canvas {
     position:absolute; top:0; left:0; width:100%; height:100%;
-    object-fit:cover; transform: scaleX(-1);
+    object-fit:cover; /* mirroring is baked into the pixel buffer in render(), not CSS —
+                          CSS transforms don't apply to captureStream() output */
   }
   #hud {
     position:absolute; top:14px; left:14px; z-index:5;
@@ -19,11 +20,42 @@
     padding:6px 12px; border-radius:8px; font-size:13px; letter-spacing:0.02em;
     pointer-events:none; white-space:nowrap;
   }
+  #recordIndicator {
+    position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:5;
+    display:none; align-items:center; gap:8px;
+    color:#FF4444; background:rgba(0,0,0,0.55); border:1px solid rgba(255,68,68,0.4);
+    padding:6px 12px; border-radius:8px; font-size:13px; font-weight:600;
+  }
+  #recordIndicator.active { display:flex; }
+  .record-dot { width:8px; height:8px; background:#FF4444; border-radius:50%; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%, 100% { opacity:1; } 50% { opacity:0.4; } }
+
   #toolbar { position:absolute; top:14px; right:14px; z-index:6; display:flex; gap:8px; }
   #toolbar button {
     background:rgba(0,0,0,0.55); color:#7CFF9E; border:1px solid rgba(124,255,158,0.4);
     border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600;
   }
+
+  /* Camera-app style shutter button, bottom center, own layer — not sharing
+     a container with any other control so it can't visually collide with them. */
+  #recordBtn {
+    position:fixed; left:50%; bottom:calc(26px + env(safe-area-inset-bottom));
+    transform:translateX(-50%); z-index:8;
+    width:72px; height:72px; border-radius:50%;
+    background:rgba(0,0,0,0.3); border:4px solid rgba(255,255,255,0.9);
+    display:flex; align-items:center; justify-content:center; padding:0;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #recordBtn:active { background:rgba(0,0,0,0.5); }
+  #recordBtnInner {
+    width:56px; height:56px; border-radius:50%; background:#FF3B30;
+    transition: width .18s ease, height .18s ease, border-radius .18s ease;
+  }
+  #recordBtn.recording { border-color:#FF3B30; }
+  #recordBtn.recording #recordBtnInner { width:26px; height:26px; border-radius:7px; }
+  #recordBtn.unsupported { opacity:0.35; }
+  #recordBtn.unsupported #recordBtnInner { background:#888; }
+
   .sheet {
     position:fixed; left:0; right:0; bottom:0; max-height:50vh; overflow-y:auto;
     background:rgba(9,13,11,0.92); backdrop-filter: blur(12px);
@@ -55,6 +87,13 @@
     color:#7CFF9E; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size:11px; line-height:1.55; white-space:pre; margin:0;
   }
+  .recording-info {
+    background:rgba(255,68,68,0.1); border:1px solid rgba(255,68,68,0.3); border-radius:8px;
+    padding:10px 12px; margin-bottom:12px; color:#FF9999; font-size:13px;
+  }
+  .recording-info p { margin:0 0 8px 0; }
+  .recording-info a { color:#7CFF9E; text-decoration:none; display:inline-block; margin-top:8px; }
+  .recording-info a:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -63,13 +102,26 @@
   <canvas id="canvas"></canvas>
   <div id="hud">loading hand tracking…</div>
 
+  <div id="recordIndicator">
+    <div class="record-dot"></div>
+    <span id="recordTimer">0:00</span>
+  </div>
+
   <div id="toolbar">
     <button id="styleToggle">⚙ Style</button>
     <button id="dataToggle">{ } Data</button>
   </div>
 
+  <button id="recordBtn" aria-label="Record"><span id="recordBtnInner"></span></button>
+
   <div id="stylePanel" class="sheet">
     <div class="sheet-handle"></div>
+
+    <div id="recordingAlert" class="recording-info" style="display:none;">
+      <p id="recordMsg"></p>
+      <a id="downloadLink" href="#" download="hand-frame.webm">Download video</a>
+    </div>
+
     <div class="row">
       <label>Depth mode</label>
       <select id="depthMode">
@@ -150,6 +202,12 @@ const canvas  = document.getElementById('canvas');
 const ctx     = canvas.getContext('2d');
 const hud     = document.getElementById('hud');
 const dataOut = document.getElementById('dataOut');
+const recordBtn = document.getElementById('recordBtn');
+const recordIndicator = document.getElementById('recordIndicator');
+const recordTimer = document.getElementById('recordTimer');
+const recordingAlert = document.getElementById('recordingAlert');
+const recordMsg = document.getElementById('recordMsg');
+const downloadLink = document.getElementById('downloadLink');
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -190,6 +248,21 @@ let handLandmarker;
 let fxCanvas, fxCtx, maskLow, maskCtx;
 let smoothedCorners = null;
 
+// --- recording ---
+let mediaRecorder = null;
+let recordingChunks = [];
+let isRecording = false;
+let recordingStartTime = 0;
+let recordMimeType = null;
+
+const MIME_CANDIDATES = [
+  'video/mp4;codecs=avc1',   // Safari / iOS
+  'video/mp4',
+  'video/webm;codecs=vp9',   // Chrome / Firefox
+  'video/webm;codecs=vp8',
+  'video/webm'
+];
+
 function hexToRgba(hex, a) {
   const v = hex.replace('#', '');
   return `rgba(${parseInt(v.substring(0,2),16)},${parseInt(v.substring(2,4),16)},${parseInt(v.substring(4,6),16)},${a})`;
@@ -229,6 +302,7 @@ async function init() {
   resizeMask();
 
   bindControls();
+  setupRecording();
   requestAnimationFrame(loop);
 }
 
@@ -239,6 +313,68 @@ function resizeMask() {
   maskLow.height = Math.max(1, Math.round(lowW * canvas.height / canvas.width));
 }
 
+function setupRecording() {
+  if (!canvas.captureStream || !window.MediaRecorder) {
+    disableRecording('Recording not supported in this browser');
+    return;
+  }
+  recordMimeType = MIME_CANDIDATES.find(t => MediaRecorder.isTypeSupported(t)) || null;
+  if (!recordMimeType) {
+    disableRecording('No supported recording format on this device');
+    return;
+  }
+
+  try {
+    const stream = canvas.captureStream(30);
+    mediaRecorder = new MediaRecorder(stream, { mimeType: recordMimeType });
+  } catch (err) {
+    console.warn('MediaRecorder init failed:', err);
+    disableRecording('Recording failed to initialize');
+    return;
+  }
+
+  mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordingChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    const baseType = recordMimeType.split(';')[0];
+    const blob = new Blob(recordingChunks, { type: baseType });
+    const url = URL.createObjectURL(blob);
+    const ext = baseType.includes('mp4') ? 'mp4' : 'webm';
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    downloadLink.href = url;
+    downloadLink.download = `hand-frame-${timestamp}.${ext}`;
+    recordingAlert.style.display = 'block';
+    recordMsg.textContent = `Recording saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`;
+  };
+}
+
+function disableRecording(reason) {
+  recordBtn.classList.add('unsupported');
+  recordBtn.title = reason;
+  recordBtn.disabled = true;
+}
+
+recordBtn.addEventListener('click', () => {
+  if (!mediaRecorder) return;
+  try {
+    if (!isRecording) {
+      recordingChunks = [];
+      recordingAlert.style.display = 'none';
+      recordingStartTime = performance.now();
+      mediaRecorder.start();
+      isRecording = true;
+      recordBtn.classList.add('recording');
+      recordIndicator.classList.add('active');
+    } else {
+      mediaRecorder.stop();
+      isRecording = false;
+      recordBtn.classList.remove('recording');
+      recordIndicator.classList.remove('active');
+    }
+  } catch (err) {
+    console.warn('Recording toggle failed:', err);
+  }
+});
+
 let lastVideoTime = -1;
 let lastRafTs = performance.now();
 let fps = 0, detectMs = 0;
@@ -247,6 +383,11 @@ function loop(ts) {
   const dt = ts - lastRafTs;
   lastRafTs = ts;
   if (dt > 0) fps = fps ? fps * 0.9 + (1000 / dt) * 0.1 : 1000 / dt;
+
+  if (isRecording) {
+    const elapsed = Math.floor((performance.now() - recordingStartTime) / 1000);
+    recordTimer.textContent = `${Math.floor(elapsed / 60)}:${(elapsed % 60).toString().padStart(2, '0')}`;
+  }
 
   if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -260,9 +401,6 @@ function loop(ts) {
 
 const toPx = lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
 
-/* Corners sit exactly ON the fingertips. Depth is recorded per corner for
-   shading, but by default it does NOT move the corner — that displacement was
-   what pulled the box off the fingers. Only 'warp' mode nudges them, gently. */
 function buildQuad(tipPoints) {
   const cx = tipPoints.reduce((s, p) => s + p.x, 0) / tipPoints.length;
   const cy = tipPoints.reduce((s, p) => s + p.y, 0) / tipPoints.length;
@@ -276,17 +414,10 @@ function buildQuad(tipPoints) {
   const zRange = Math.max(1e-4, zMax - zMin);
 
   return ordered.map(p => {
-    const depth = (p.z - zMin) / zRange; // 0 = nearest, 1 = farthest
-    if (settings.depthMode !== 'warp') {
-      return { x: p.x, y: p.y, z: p.z, depth };
-    }
+    const depth = (p.z - zMin) / zRange;
+    if (settings.depthMode !== 'warp') return { x: p.x, y: p.y, z: p.z, depth };
     const push = 1 + (0.5 - depth) * 0.18 * settings.depthAmount;
-    return {
-      x: cx + (p.x - cx) * push,
-      y: cy + (p.y - cy) * push,
-      z: p.z,
-      depth
-    };
+    return { x: cx + (p.x - cx) * push, y: cy + (p.y - cy) * push, z: p.z, depth };
   });
 }
 
@@ -450,7 +581,7 @@ function updateDataPanel(hands, handedness, poly, tilt) {
   if (!document.getElementById('dataPanel').classList.contains('open')) return;
   if (++dataFrameCounter % 5 !== 0) return;
 
-  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\ndepth mode  ${settings.depthMode}\n`;
+  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\ndepth mode  ${settings.depthMode}\nrec codec   ${recordMimeType || 'n/a'}\n`;
   if (poly) {
     out += `frame area  ${polygonArea(poly).toFixed(0)} px\u00B2\n`;
     out += `depth tilt  ${tilt.toFixed(3)}\n`;
@@ -478,6 +609,14 @@ function render(handRes) {
   ctx.globalCompositeOperation = 'source-over';
   ctx.filter = 'none';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Mirror is baked into the pixel buffer here (not CSS) so recordings via
+  // captureStream() match exactly what's shown on screen.
+  if (settings.mirror) {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
+
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   const raw = handRes.landmarks || [];
@@ -557,10 +696,7 @@ function bindControls() {
   $('skeletonMode').addEventListener('change', e => settings.skeletonMode = e.target.value);
   $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
   $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
-  $('mirrorToggle').addEventListener('change', e => {
-    settings.mirror = e.target.checked;
-    canvas.style.transform = settings.mirror ? 'scaleX(-1)' : 'none';
-  });
+  $('mirrorToggle').addEventListener('change', e => { settings.mirror = e.target.checked; });
 
   $('resetBtn').addEventListener('click', () => {
     Object.assign(settings, DEFAULTS);
@@ -583,7 +719,6 @@ function bindControls() {
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
-    canvas.style.transform = 'scaleX(-1)';
     syncDepthRow();
     resizeMask();
   });
