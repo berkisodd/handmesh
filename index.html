@@ -102,6 +102,27 @@
   .recording-info p { margin:0 0 8px 0; }
   .recording-info a { color:#7CFF9E; text-decoration:none; display:inline-block; margin-top:8px; }
   .recording-info a:hover { text-decoration:underline; }
+
+  #recordToast {
+    position:fixed; left:50%; bottom:calc(122px + env(safe-area-inset-bottom));
+    transform:translateX(-50%) translateY(10px);
+    width:min(300px, calc(100vw - 40px));
+    background:rgba(8,14,11,0.96); border:1px solid rgba(70,255,130,0.55);
+    border-radius:14px; padding:14px 16px; z-index:14;
+    box-shadow:0 10px 28px rgba(0,0,0,0.55);
+    opacity:0; pointer-events:none; transition: opacity .25s ease, transform .25s ease;
+  }
+  #recordToast.show { opacity:1; pointer-events:auto; transform:translateX(-50%) translateY(0); }
+  #recordToast .toast-title { color:#EAFFF1; font-weight:700; font-size:14px; margin:0 0 2px; }
+  #recordToast .toast-sub { color:#8FE8AC; font-size:12px; margin:0 0 10px; }
+  #recordToast .toast-download {
+    display:block; text-align:center; background:#46FF82; color:#06210F;
+    font-weight:700; font-size:14px; padding:11px; border-radius:9px; text-decoration:none;
+  }
+  #toastClose {
+    position:absolute; top:6px; right:8px; background:none; border:none; color:#7CFF9E;
+    font-size:20px; line-height:1; padding:6px; -webkit-tap-highlight-color:transparent;
+  }
 </style>
 </head>
 <body>
@@ -118,6 +139,13 @@
   <div id="toolbar">
     <button id="styleToggle">⚙ Style</button>
     <button id="dataToggle">{ } Data</button>
+  </div>
+
+  <div id="recordToast">
+    <button id="toastClose" aria-label="Dismiss">×</button>
+    <p class="toast-title">Recording saved</p>
+    <p class="toast-sub" id="toastSub"></p>
+    <a id="toastDownload" class="toast-download" href="#" download="hand-frame.webm">⬇ Download video</a>
   </div>
 
   <button id="viewModeBtn" aria-label="3D data view" title="3D data view">
@@ -223,6 +251,10 @@ const recordingAlert = document.getElementById('recordingAlert');
 const recordMsg = document.getElementById('recordMsg');
 const downloadLink = document.getElementById('downloadLink');
 const viewModeBtn = document.getElementById('viewModeBtn');
+const recordToast = document.getElementById('recordToast');
+const toastClose = document.getElementById('toastClose');
+const toastDownload = document.getElementById('toastDownload');
+const toastSub = document.getElementById('toastSub');
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -363,12 +395,26 @@ function setupRecording() {
     const url = URL.createObjectURL(blob);
     const ext = baseType.includes('mp4') ? 'mp4' : 'webm';
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    const filename = `hand-frame-${timestamp}.${ext}`;
+    const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+
+    // Panel entry (Style sheet) — kept as a fallback if the toast gets dismissed
     downloadLink.href = url;
-    downloadLink.download = `hand-frame-${timestamp}.${ext}`;
+    downloadLink.download = filename;
     recordingAlert.style.display = 'block';
-    recordMsg.textContent = `Recording saved (${(blob.size / 1024 / 1024).toFixed(1)} MB)`;
+    recordMsg.textContent = `Recording saved (${sizeMB} MB)`;
+
+    // Prominent on-screen toast — shown immediately so it's impossible to miss
+    toastDownload.href = url;
+    toastDownload.download = filename;
+    toastSub.textContent = `${sizeMB} MB \u00B7 tap below to save it`;
+    recordToast.classList.add('show');
   };
 }
+
+function hideToast() { recordToast.classList.remove('show'); }
+toastClose.addEventListener('click', hideToast);
+toastDownload.addEventListener('click', () => setTimeout(hideToast, 300));
 
 function disableRecording(reason) {
   recordBtn.classList.add('unsupported');
@@ -382,6 +428,7 @@ recordBtn.addEventListener('click', () => {
     if (!isRecording) {
       recordingChunks = [];
       recordingAlert.style.display = 'none';
+      hideToast();
       recordingStartTime = performance.now();
       mediaRecorder.start();
       isRecording = true;
@@ -440,6 +487,8 @@ function initThreeScene() {
   threeScene.fog = new THREE.Fog(0x0a0f0c, 3, 9);
 
   threeCamera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.05, 50);
+  threeCamera.position.set(0, 0.55, 2.6); // fixed — does not move on its own
+  threeCamera.lookAt(0, -0.1, 0);
 
   const grid = new THREE.GridHelper(8, 20, 0x2a4a35, 0x162019);
   grid.position.y = -1.4;
@@ -535,9 +584,6 @@ function render3D(handRes) {
     if (!twoHands) smoothedCorners = null;
   }
 
-  const t = performance.now() * 0.00018;
-  threeCamera.position.set(Math.sin(t) * 2.6, 0.5, Math.cos(t) * 2.6);
-  threeCamera.lookAt(0, -0.1, 0);
   threeRenderer.render(threeScene, threeCamera);
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
