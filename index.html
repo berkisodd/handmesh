@@ -36,8 +36,9 @@
   .sheet-handle { width:36px; height:4px; border-radius:2px; background:rgba(124,255,158,0.4); margin:8px auto 14px; }
   .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; color:#CDEFD9; font-size:14px; }
   .row > label:first-child { flex-shrink:0; opacity:0.85; }
-  .row select { flex:1; max-width:170px; }
+  .row select { flex:1; max-width:180px; }
   .row input[type=range] { flex:1; accent-color:#46FF82; }
+  .row.disabled { opacity:0.35; pointer-events:none; }
   select {
     background:rgba(255,255,255,0.08); color:#EAFFF1; border:1px solid rgba(124,255,158,0.3);
     border-radius:6px; padding:5px 8px; font-size:13px;
@@ -70,6 +71,18 @@
   <div id="stylePanel" class="sheet">
     <div class="sheet-handle"></div>
     <div class="row">
+      <label>Depth mode</label>
+      <select id="depthMode">
+        <option value="flat">Flat (simple)</option>
+        <option value="shade" selected>Shaded edges</option>
+        <option value="warp">Perspective warp</option>
+      </select>
+    </div>
+    <div class="row" id="depthAmountRow">
+      <label>Warp amount <span id="depthVal">0.60</span></label>
+      <input type="range" id="depthAmount" min="0" max="150" value="60">
+    </div>
+    <div class="row">
       <label>Frame color</label>
       <input type="color" id="frameColor" value="#46ff82">
     </div>
@@ -90,10 +103,6 @@
         <option value="overlay">Overlay</option>
         <option value="difference">Difference</option>
       </select>
-    </div>
-    <div class="row">
-      <label>Depth / twist <span id="depthVal">1.00</span></label>
-      <input type="range" id="depthAmount" min="0" max="250" value="100">
     </div>
     <div class="row">
       <label>Pixelation <span id="blockResVal">64</span></label>
@@ -120,7 +129,6 @@
       </select>
     </div>
     <div class="row toggles">
-      <label><input type="checkbox" id="depthShade" checked> Depth shading on edges</label>
       <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
       <label><input type="checkbox" id="showOutline" checked> Show frame outline</label>
       <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
@@ -162,16 +170,16 @@ const LANDMARK_NAMES = [
 ];
 
 const DEFAULTS = {
+  depthMode: 'shade',
+  depthAmount: 0.6,
   frameColor: '#46ff82',
   effectStyle: 'invert',
   blendMode: 'multiply',
-  depthAmount: 1.0,
   blockRes: 64,
   opacity: 0.85,
   smoothing: 0.35,
   frameScale: 1.0,
   skeletonMode: 'two-tone',
-  depthShade: true,
   showSkeleton: true,
   showOutline: true,
   mirror: true
@@ -252,11 +260,9 @@ function loop(ts) {
 
 const toPx = lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
 
-/* Build the quad straight from the four fingertips — this is what made the
-   earlier version feel alive. Order them around the centroid so the polygon
-   never self-intersects, then push each corner along the centroid ray by its
-   relative depth: near corners bulge out, far corners pull in. That's what
-   sells the twist as perspective instead of a flat spinning rect. */
+/* Corners sit exactly ON the fingertips. Depth is recorded per corner for
+   shading, but by default it does NOT move the corner — that displacement was
+   what pulled the box off the fingers. Only 'warp' mode nudges them, gently. */
 function buildQuad(tipPoints) {
   const cx = tipPoints.reduce((s, p) => s + p.x, 0) / tipPoints.length;
   const cy = tipPoints.reduce((s, p) => s + p.y, 0) / tipPoints.length;
@@ -268,17 +274,18 @@ function buildQuad(tipPoints) {
   const zs = ordered.map(p => p.z);
   const zMin = Math.min(...zs), zMax = Math.max(...zs);
   const zRange = Math.max(1e-4, zMax - zMin);
-  const k = settings.depthAmount;
 
   return ordered.map(p => {
-    // 0 = nearest corner, 1 = farthest (MediaPipe z is negative toward camera)
-    const t = (p.z - zMin) / zRange;
-    const push = 1 + (0.5 - t) * 0.45 * k;
+    const depth = (p.z - zMin) / zRange; // 0 = nearest, 1 = farthest
+    if (settings.depthMode !== 'warp') {
+      return { x: p.x, y: p.y, z: p.z, depth };
+    }
+    const push = 1 + (0.5 - depth) * 0.18 * settings.depthAmount;
     return {
       x: cx + (p.x - cx) * push,
       y: cy + (p.y - cy) * push,
       z: p.z,
-      depth: t
+      depth
     };
   });
 }
@@ -372,27 +379,25 @@ function buildLowResMask(poly) {
   maskCtx.fill();
 }
 
-/* Edges shaded by the depth of their endpoints — near edges bright and thick,
-   far edges dim and thin. Cheap, but it's the cue that reads as 3D. */
 function drawDepthEdges(poly) {
   for (let i = 0; i < poly.length; i++) {
     const a = poly[i], b = poly[(i + 1) % poly.length];
-    const d = (a.depth + b.depth) / 2;
-    const near = 1 - d;
+    const near = 1 - (a.depth + b.depth) / 2;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = hexToRgba(settings.frameColor, 0.25 + near * 0.75);
-    ctx.lineWidth = 1.5 + near * 4;
+    ctx.strokeStyle = hexToRgba(settings.frameColor, 0.3 + near * 0.7);
+    ctx.lineWidth = 1.5 + near * 3.5;
     ctx.stroke();
   }
-  for (const p of poly) {
-    const near = 1 - p.depth;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 3 + near * 5, 0, Math.PI * 2);
-    ctx.fillStyle = hexToRgba(settings.frameColor, 0.4 + near * 0.6);
-    ctx.fill();
-  }
+}
+
+function drawFlatOutline(poly) {
+  const isOutlineMode = settings.effectStyle === 'outline';
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, isOutlineMode ? Math.max(settings.opacity, 0.6) : 0.4);
+  ctx.lineWidth = isOutlineMode ? 4 : 2;
+  ctx.stroke();
 }
 
 function drawFrameEffect(poly) {
@@ -433,14 +438,10 @@ function drawFrameEffect(poly) {
     ctx.drawImage(fxCanvas, 0, 0);
   }
 
-  if (settings.depthShade) {
-    drawDepthEdges(poly);
-  } else if (settings.showOutline || settings.effectStyle === 'outline') {
-    const isOutlineMode = settings.effectStyle === 'outline';
-    tracePath(ctx, poly);
-    ctx.strokeStyle = hexToRgba(settings.frameColor, isOutlineMode ? Math.max(settings.opacity, 0.6) : 0.4);
-    ctx.lineWidth = isOutlineMode ? 4 : 2;
-    ctx.stroke();
+  if (settings.depthMode === 'flat') {
+    if (settings.showOutline || settings.effectStyle === 'outline') drawFlatOutline(poly);
+  } else {
+    if (settings.showOutline || settings.effectStyle === 'outline') drawDepthEdges(poly);
   }
 }
 
@@ -449,7 +450,7 @@ function updateDataPanel(hands, handedness, poly, tilt) {
   if (!document.getElementById('dataPanel').classList.contains('open')) return;
   if (++dataFrameCounter % 5 !== 0) return;
 
-  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\n`;
+  let out = `render fps  ${fps.toFixed(1)}\ndetect ms   ${detectMs.toFixed(1)}\nhands       ${hands.length}\ndepth mode  ${settings.depthMode}\n`;
   if (poly) {
     out += `frame area  ${polygonArea(poly).toFixed(0)} px\u00B2\n`;
     out += `depth tilt  ${tilt.toFixed(3)}\n`;
@@ -517,16 +518,25 @@ function bindControls() {
   const stylePanel = $('stylePanel');
   const dataPanel  = $('dataPanel');
 
+  const syncDepthRow = () => {
+    $('depthAmountRow').classList.toggle('disabled', settings.depthMode !== 'warp');
+  };
+
   $('styleToggle').onclick = () => { dataPanel.classList.remove('open'); stylePanel.classList.toggle('open'); };
   $('dataToggle').onclick  = () => { stylePanel.classList.remove('open'); dataPanel.classList.toggle('open'); };
 
-  $('frameColor').addEventListener('input', e => settings.frameColor = e.target.value);
-  $('effectStyle').addEventListener('change', e => settings.effectStyle = e.target.value);
-  $('blendMode').addEventListener('change', e => settings.blendMode = e.target.value);
+  $('depthMode').addEventListener('change', e => {
+    settings.depthMode = e.target.value;
+    smoothedCorners = null;
+    syncDepthRow();
+  });
   $('depthAmount').addEventListener('input', e => {
     settings.depthAmount = parseInt(e.target.value, 10) / 100;
     $('depthVal').textContent = settings.depthAmount.toFixed(2);
   });
+  $('frameColor').addEventListener('input', e => settings.frameColor = e.target.value);
+  $('effectStyle').addEventListener('change', e => settings.effectStyle = e.target.value);
+  $('blendMode').addEventListener('change', e => settings.blendMode = e.target.value);
   $('blockRes').addEventListener('input', e => {
     settings.blockRes = parseInt(e.target.value, 10);
     $('blockResVal').textContent = settings.blockRes;
@@ -545,7 +555,6 @@ function bindControls() {
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
   });
   $('skeletonMode').addEventListener('change', e => settings.skeletonMode = e.target.value);
-  $('depthShade').addEventListener('change', e => settings.depthShade = e.target.checked);
   $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
   $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
   $('mirrorToggle').addEventListener('change', e => {
@@ -556,11 +565,12 @@ function bindControls() {
   $('resetBtn').addEventListener('click', () => {
     Object.assign(settings, DEFAULTS);
     smoothedCorners = null;
+    $('depthMode').value = settings.depthMode;
+    $('depthAmount').value = settings.depthAmount * 100;
+    $('depthVal').textContent = settings.depthAmount.toFixed(2);
     $('frameColor').value = settings.frameColor;
     $('effectStyle').value = settings.effectStyle;
     $('blendMode').value = settings.blendMode;
-    $('depthAmount').value = settings.depthAmount * 100;
-    $('depthVal').textContent = settings.depthAmount.toFixed(2);
     $('blockRes').value = settings.blockRes;
     $('blockResVal').textContent = settings.blockRes;
     $('opacity').value = settings.opacity * 100;
@@ -570,13 +580,15 @@ function bindControls() {
     $('frameScale').value = settings.frameScale * 100;
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
     $('skeletonMode').value = settings.skeletonMode;
-    $('depthShade').checked = true;
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
     canvas.style.transform = 'scaleX(-1)';
+    syncDepthRow();
     resizeMask();
   });
+
+  syncDepthRow();
 }
 
 init().catch(err => {
