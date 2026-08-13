@@ -495,6 +495,8 @@ const CAM_FOV_DEG = 45, CONTENT_MARGIN = 1.35;
 const TWIST_SEGMENTS = 24;
 let twistTurns = 0;      // whole extra rotations accumulated past ±180°
 let lastRollAngle = null;
+let lastHandKey = null;  // detects hand slots swapping between frames
+let smoothedTwist = null;
 
 // Canvas resolution now tracks the actual screen (portrait iPhone, landscape
 // desktop, either orientation on iPad) instead of the camera's native buffer.
@@ -909,16 +911,11 @@ function updateBox3D(poly) {
   const startArm = endA1.clone().sub(endA0).multiplyScalar(0.5);
   const endArm   = endB1.clone().sub(endB0).multiplyScalar(0.5);
 
-  // Angle between the two ends' cross-sections, measured about the ribbon axis —
-  // this is the actual twist your hands are making, not a canned animation.
-  const sPerp = startArm.clone().projectOnPlane(axis);
-  const ePerp = endArm.clone().projectOnPlane(axis);
-  let twist = 0;
-  if (sPerp.lengthSq() > 1e-8 && ePerp.lengthSq() > 1e-8) {
-    sPerp.normalize(); ePerp.normalize();
-    twist = Math.atan2(sPerp.clone().cross(ePerp).dot(axis), sPerp.dot(ePerp));
-  }
-  twist += Math.PI * 2 * twistTurns * settings.twistAmount;
+  // Single twist source: the smoothed accumulated hand roll. Previously this
+  // ALSO measured the angle between the two end cross-sections and added the
+  // two together — but that geometric term is itself derived from the same
+  // moving corners, so the two fought each other and amplified any jitter.
+  const twist = Math.PI * 2 * (smoothedTwist || 0);
 
   const segs = TWIST_SEGMENTS;
   const pos = box3D.geom.attributes.position;
@@ -1055,22 +1052,38 @@ function render3D(handRes) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
 
-    // Roll of each hand (thumb→index tip), differenced to get relative rotation.
-    // atan2 wraps at ±180°, so unwrap it into a running turn count — otherwise
-    // the ribbon would snap back the moment you passed a half-turn.
-    const rollOf = h => {
-      const a = h[4], b = h[8];
-      return Math.atan2(b.y - a.y, b.x - a.x);
-    };
+    // Roll from wrist(0) -> middle knuckle(9): the hand's spine. The old
+    // thumb-tip -> index-tip vector is nearly zero-length while you're making a
+    // frame, so a few pixels of tracking noise swung its angle wildly.
+    const rollOf = h => Math.atan2(h[9].y - h[0].y, h[9].x - h[0].x);
+
+    // Hands are sorted by wrist x, so when they cross, the two slots swap and
+    // the relative angle flips ~180 degrees in one frame. Unwrapping read that
+    // as a real half-turn and injected a whole rotation — the main jerk source.
+    const idKey = handedness.map(hd => hd?.[0]?.categoryName || '?').join('');
+    const orderChanged = idKey !== lastHandKey;
+    lastHandKey = idKey;
+
     const rel = rollOf(hands[1]) - rollOf(hands[0]);
-    if (lastRollAngle !== null) {
+    if (lastRollAngle !== null && !orderChanged) {
       let d = rel - lastRollAngle;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
-      twistTurns += d / (Math.PI * 2);
-      twistTurns = Math.max(-3, Math.min(3, twistTurns)); // cap so it can't wind up forever
+      // A hand can't really rotate ~35 deg between frames at 30fps, so treat
+      // anything larger as a glitch and drop it instead of winding the ribbon.
+      if (Math.abs(d) < 0.6) {
+        twistTurns += d / (Math.PI * 2);
+        twistTurns = Math.max(-3, Math.min(3, twistTurns));
+      }
     }
     lastRollAngle = rel;
+
+    // Smooth the value the ribbon actually uses so residual jitter doesn't
+    // show up as shaking even when the raw reading wobbles a little.
+    const targetTwist = twistTurns * settings.twistAmount;
+    smoothedTwist = smoothedTwist === null
+      ? targetTwist
+      : smoothedTwist + (targetTwist - smoothedTwist) * 0.15;
 
     const quad = buildQuad(tips);
     poly = smoothCorners(scalePolygon(quad, settings.frameScale));
@@ -1080,7 +1093,9 @@ function render3D(handRes) {
     if (!twoHands) {
       smoothedCorners = null;
       lastRollAngle = null;
+      lastHandKey = null;
       twistTurns = 0;
+      smoothedTwist = null;
     }
   }
 
@@ -1656,7 +1671,7 @@ function bindControls() {
     $('scaleVal').textContent = settings.frameScale.toFixed(2);
     $('twistAmount').value = settings.twistAmount * 100;
     $('twistVal').textContent = settings.twistAmount.toFixed(2);
-    twistTurns = 0; lastRollAngle = null;
+    twistTurns = 0; lastRollAngle = null; lastHandKey = null; smoothedTwist = null;
     $('skeletonMode').value = settings.skeletonMode;
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
