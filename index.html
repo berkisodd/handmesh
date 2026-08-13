@@ -585,6 +585,8 @@ const CHANGELOG = [
     'Low light and poor tracking warnings',
     'Error codes with plain-English meanings, viewable in Settings',
     'Mobile layout fixes across iPhone, iPad, and desktop',
+    'The box no longer disappears instantly when one hand briefly leaves frame — it holds for about a second before clearing',
+    'A hand no longer drops out just because one unrelated finger (like the pinky) is off-frame or occluded — thumb and index are what actually matter',
   ]},
 ];
 const CURRENT_VERSION = CHANGELOG[0].version;
@@ -617,6 +619,18 @@ const MAX_PARTICLES = 70;
 // --- bouncy effect: simple spring-damper on box center/size, so the shape
 // actually overshoots and settles instead of just decorating a static box.
 let bouncyState = null; // { cx, cy, w, h, vcx, vcy, vw, vh }
+
+// --- graceful hand dropout ---
+// MediaPipe reports a hand as fully present or not present at all — there's no
+// partial tracking. Losing one hand for a frame or two (it dips to the frame
+// edge, gets briefly occluded, etc.) shouldn't nuke the whole box; hold the
+// last known position of the missing hand's tips briefly while the visible
+// hand keeps updating live.
+let lastKnownTips = null;      // [tip,tip,tip,tip] from the last frame both hands were seen
+let missingHandFrames = 0;
+const HOLD_FRAMES = 24;        // ~0.8s at 30fps grace period before the box actually clears
+let lastKnownTips3d = null;    // same idea, tracked separately for the 3D twist box
+let missingHandFrames3d = 0;
 
 // --- environment/tracking quality warnings ---
 let lumaCanvas = null, lumaCtx = null;
@@ -743,7 +757,15 @@ async function init() {
         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
       },
       numHands: 2,
-      runningMode: "VIDEO"
+      runningMode: "VIDEO",
+      // Defaults (0.5 each) require fairly high overall-hand confidence, which
+      // can drop the entire hand — thumb and index included — just because an
+      // unrelated finger like the pinky curled out of frame or got occluded.
+      // This app only ever uses thumb+index, so it's fine to be more lenient
+      // about the rest of the hand as long as those two stay trackable.
+      minHandDetectionConfidence: 0.35,
+      minHandPresenceConfidence: 0.35,
+      minTrackingConfidence: 0.35
     });
   } catch (err) {
     showFatalError('E04', err);
@@ -1281,10 +1303,14 @@ function render3D(handRes) {
   });
 
   const twoHands = hands.length >= 2;
+  const oneHand3d = hands.length === 1;
   let poly = null;
+
   if (twoHands && settings.showOutline) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
+    lastKnownTips3d = tips;
+    missingHandFrames3d = 0;
 
     // Roll from wrist(0) -> middle knuckle(9): the hand's spine. The old
     // thumb-tip -> index-tip vector is nearly zero-length while you're making a
@@ -1322,14 +1348,37 @@ function render3D(handRes) {
     const quad = buildQuad(tips);
     poly = smoothCorners(scalePolygon(quad, settings.frameScale));
     updateBox3D(poly);
+  } else if (oneHand3d && settings.showOutline && lastKnownTips3d && missingHandFrames3d < HOLD_FRAMES) {
+    // Same brief-dropout tolerance as the camera view: keep the ribbon visible
+    // using the live hand's tips plus the other side's last known position.
+    // Twist itself freezes rather than resets — a one-handed frame can't
+    // meaningfully report rotation, so hold the shape steady instead of
+    // untwisting it out from under you.
+    missingHandFrames3d++;
+    const visTips = [toPx(hands[0][4]), toPx(hands[0][8])];
+    const visMidX = (visTips[0].x + visTips[1].x) / 2;
+    const leftMidX = (lastKnownTips3d[0].x + lastKnownTips3d[1].x) / 2;
+    const rightMidX = (lastKnownTips3d[2].x + lastKnownTips3d[3].x) / 2;
+    const isLeftSide = Math.abs(visMidX - leftMidX) < Math.abs(visMidX - rightMidX);
+
+    const tips = isLeftSide
+      ? [visTips[0], visTips[1], lastKnownTips3d[2], lastKnownTips3d[3]]
+      : [lastKnownTips3d[0], lastKnownTips3d[1], visTips[0], visTips[1]];
+    lastKnownTips3d = tips;
+
+    const quad = buildQuad(tips);
+    poly = smoothCorners(scalePolygon(quad, settings.frameScale));
+    updateBox3D(poly);
   } else {
     box3D.group.visible = false;
-    if (!twoHands) {
+    if (!twoHands && !(oneHand3d && missingHandFrames3d < HOLD_FRAMES)) {
       smoothedCorners = null;
       lastRollAngle = null;
       lastHandKey = null;
       twistTurns = 0;
       smoothedTwist = null;
+      lastKnownTips3d = null;
+      missingHandFrames3d = 0;
     }
   }
 
@@ -1911,11 +1960,36 @@ function renderCamera(handRes) {
   updateQualityWarning(handedness);
 
   const twoHands = hands.length >= 2;
+  const oneHand = hands.length === 1;
   let poly = null, tilt = 0;
 
   if (twoHands) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
+    lastKnownTips = tips;
+    missingHandFrames = 0;
+
+    const quad = buildQuad(tips);
+    poly = smoothCorners(scalePolygon(quad, settings.frameScale));
+    const zs = poly.map(p => p.z);
+    tilt = Math.max(...zs) - Math.min(...zs);
+    drawFrameEffect(poly);
+  } else if (oneHand && lastKnownTips && missingHandFrames < HOLD_FRAMES) {
+    // One hand dropped out, but we still have a recent fix on where the box
+    // was. Keep the visible hand's side live (identified by which side of the
+    // last-known box it's closer to) and hold the missing side in place.
+    missingHandFrames++;
+    const visTips = [toPx(hands[0][4]), toPx(hands[0][8])];
+    const visMidX = (visTips[0].x + visTips[1].x) / 2;
+    const leftMidX = (lastKnownTips[0].x + lastKnownTips[1].x) / 2;
+    const rightMidX = (lastKnownTips[2].x + lastKnownTips[3].x) / 2;
+    const isLeftSide = Math.abs(visMidX - leftMidX) < Math.abs(visMidX - rightMidX);
+
+    const tips = isLeftSide
+      ? [visTips[0], visTips[1], lastKnownTips[2], lastKnownTips[3]]
+      : [lastKnownTips[0], lastKnownTips[1], visTips[0], visTips[1]];
+    lastKnownTips = tips; // keep the live side fresh so it doesn't snap when the other hand returns
+
     const quad = buildQuad(tips);
     poly = smoothCorners(scalePolygon(quad, settings.frameScale));
     const zs = poly.map(p => p.z);
@@ -1925,19 +1999,24 @@ function renderCamera(handRes) {
     smoothedCorners = null;
     if (particles.length) particles = [];
     bouncyState = null;
+    lastKnownTips = null;
+    missingHandFrames = 0;
   }
 
   if (settings.showSkeleton) {
-    hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), twoHands));
+    hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), !!poly));
   }
 
   drawWatermark();
 
   const narrow = window.innerWidth < 430;
+  const holding = oneHand && poly && missingHandFrames > 0;
   hud.textContent = hands.length === 0
     ? (narrow ? "show your hands" : "show your hands to the camera")
-    : `${hands.length} hand${hands.length > 1 ? 's' : ''}`
-      + (twoHands ? ` \u00B7 tilt ${tilt.toFixed(2)}` : (narrow ? " \u00B7 need both" : " \u00B7 bring both hands in for the effect"));
+    : holding
+      ? (narrow ? "1 hand \u00B7 holding" : "1 hand \u00B7 holding the box \u2014 bring the other back")
+      : `${hands.length} hand${hands.length > 1 ? 's' : ''}`
+        + (twoHands ? ` \u00B7 tilt ${tilt.toFixed(2)}` : (narrow ? " \u00B7 need both" : " \u00B7 bring both hands in for the effect"));
 
   updateDataPanel(hands, handedness, poly, tilt);
 }
@@ -2073,6 +2152,7 @@ function bindControls() {
     $('twistAmount').value = settings.twistAmount * 100;
     $('twistVal').textContent = settings.twistAmount.toFixed(2);
     twistTurns = 0; lastRollAngle = null; lastHandKey = null; smoothedTwist = null;
+    lastKnownTips3d = null; missingHandFrames3d = 0;
     $('skeletonMode').value = settings.skeletonMode;
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
