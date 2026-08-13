@@ -163,6 +163,21 @@
     font-size:20px; line-height:1; padding:6px; -webkit-tap-highlight-color:transparent;
   }
 
+  /* ---------------- quality warnings (low light / poor tracking) ---------------- */
+  #qualityWarn {
+    position:absolute; left:50%; top:calc(100px + env(safe-area-inset-top)); z-index:7;
+    transform:translateX(-50%) translateY(-6px);
+    display:flex; align-items:center; gap:7px;
+    background:rgba(40,24,4,0.88); border:1px solid rgba(255,180,60,0.5);
+    border-radius:999px; padding:7px 14px;
+    opacity:0; pointer-events:none;
+    transition: opacity .3s ease, transform .3s ease;
+    white-space:nowrap; max-width:calc(100vw - 32px); overflow:hidden; text-overflow:ellipsis;
+  }
+  #qualityWarn.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  #qualityIcon { font-size:13px; flex:0 0 auto; }
+  #qualityText { color:#FFD98A; font-size:12.5px; font-weight:600; }
+
   /* ---------------- welcome back (returning users) ---------------- */
   #welcomeBack {
     position:absolute; left:50%; top:calc(56px + env(safe-area-inset-top)); z-index:7;
@@ -358,6 +373,11 @@
     <pre id="dataOut">waiting for hands…</pre>
   </div>
 
+  <div id="qualityWarn">
+    <span id="qualityIcon">⚠️</span>
+    <span id="qualityText"></span>
+  </div>
+
   <div id="welcomeBack">
     <span id="welcomeText"></span>
     <span id="welcomeSub"></span>
@@ -442,6 +462,8 @@ const toastClose = document.getElementById('toastClose');
 const toastDownload = document.getElementById('toastDownload');
 const toastSub = document.getElementById('toastSub');
 const micStatus = document.getElementById('micStatus');
+const qualityWarn = document.getElementById('qualityWarn');
+const qualityText = document.getElementById('qualityText');
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -485,6 +507,16 @@ let fxCanvas, fxCtx, maskLow, maskCtx;
 let smoothedCorners = null;
 let particles = [];
 const MAX_PARTICLES = 70;
+
+// --- environment/tracking quality warnings ---
+let lumaCanvas = null, lumaCtx = null;
+let avgLuma = 128;           // running estimate, 0-255
+let lowLightFrames = 0, okLightFrames = 0;
+let lowConfFrames = 0, okConfFrames = 0;
+const LOW_LIGHT_THRESHOLD = 55;   // below this, average frame brightness reads as "dark"
+const LOW_CONF_THRESHOLD = 0.55;  // MediaPipe per-hand detection score
+const WARN_STREAK = 20;           // frames needed before flagging, so a blink doesn't trigger it
+const CLEAR_STREAK = 30;          // frames needed before clearing, so it doesn't flicker on/off
 
 // --- recording ---
 let mediaRecorder = null;
@@ -1061,6 +1093,7 @@ function render3D(handRes) {
   const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
   const hands = order.map(i => raw[i]);
   const handedness = order.map(i => handedRaw[i]);
+  updateQualityWarning(handedness);
 
   handGroups3D.forEach((g, i) => {
     if (i < hands.length) updateHandGroup3D(i, hands[i].map(toPx), skeletonColorFor(i));
@@ -1306,6 +1339,60 @@ function drawDepthEdges(poly) {
   }
 }
 
+// Samples the video at low resolution to estimate average brightness — cheap
+// (16x9 px) so it's fine to run every frame, no need to touch the full canvas.
+function sampleBrightness() {
+  if (!lumaCanvas) {
+    lumaCanvas = document.createElement('canvas');
+    lumaCanvas.width = 16; lumaCanvas.height = 9;
+    lumaCtx = lumaCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  try {
+    lumaCtx.drawImage(video, 0, 0, 16, 9);
+    const data = lumaCtx.getImageData(0, 0, 16, 9).data;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    const luma = sum / (data.length / 4);
+    avgLuma = avgLuma * 0.85 + luma * 0.15; // smoothed, ignores single dark frames
+  } catch (e) { /* canvas read can fail on some browsers mid-permission-change — skip that frame */ }
+}
+
+// Debounced with a frame streak in both directions: needs several bad frames
+// in a row to warn (a blink or a hand pausing shouldn't trigger it), and
+// several good frames in a row to clear (so it doesn't flicker on/off at the
+// threshold boundary).
+function updateQualityWarning(handedness) {
+  sampleBrightness();
+
+  if (avgLuma < LOW_LIGHT_THRESHOLD) { lowLightFrames++; okLightFrames = 0; }
+  else { okLightFrames++; lowLightFrames = 0; }
+
+  const scores = handedness.filter(Boolean).map(hd => hd[0]?.score ?? 1);
+  const hasHands = scores.length > 0;
+  const worstConf = hasHands ? Math.min(...scores) : 1;
+  if (hasHands && worstConf < LOW_CONF_THRESHOLD) { lowConfFrames++; okConfFrames = 0; }
+  else { okConfFrames++; lowConfFrames = 0; }
+
+  const isDark = lowLightFrames >= WARN_STREAK;
+  const isShaky = hasHands && lowConfFrames >= WARN_STREAK;
+  const clearDark = okLightFrames >= CLEAR_STREAK;
+  const clearShaky = okConfFrames >= CLEAR_STREAK;
+
+  let msg = null;
+  if (isDark && isShaky) msg = 'Low light \u00B7 tracking may be unreliable — try brighter lighting';
+  else if (isDark) msg = 'Low light detected — tracking works best with more light';
+  else if (isShaky) msg = "Tracking is unsteady — hold hands clearly in frame";
+
+  if (msg) {
+    qualityText.textContent = msg;
+    qualityWarn.classList.add('show');
+  } else if (clearDark && clearShaky) {
+    qualityWarn.classList.remove('show');
+  }
+}
+
 function drawFlatOutline(poly) {
   const isOutlineMode = settings.effectStyle === 'outline';
   tracePath(ctx, poly);
@@ -1538,6 +1625,7 @@ function renderCamera(handRes) {
   const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
   const hands = order.map(i => raw[i]);
   const handedness = order.map(i => handedRaw[i]);
+  updateQualityWarning(handedness);
 
   const twoHands = hands.length >= 2;
   let poly = null, tilt = 0;
@@ -1764,7 +1852,38 @@ document.getElementById('helpBtn').addEventListener('click', showOnboarding);
 // loading so it's useful reading time rather than a blocking step.
 try {
   if (!localStorage.getItem('handmesh_onboarded')) showOnboarding();
-} catch (e) { /* localStorage unavailable — just skip onboarding */ }
+  else showWelcomeBack();
+} catch (e) { /* localStorage unavailable — just skip both */ }
+
+/* ---------------- welcome back (returning users) ---------------- */
+// Distinct from the onboarding modal on purpose: no tutorial, nothing to
+// dismiss, nothing blocking — just a quick "good to see you" that fades on its own.
+
+const WELCOME_TIERS = [
+  { min: 2,  max: 2,        text: 'Welcome back 👋' },
+  { min: 3,  max: 4,        text: 'Good to see you again' },
+  { min: 5,  max: 9,        text: "You're getting good at this ✨" },
+  { min: 10, max: 19,       text: 'Certified regular 🌀' },
+  { min: 20, max: Infinity, text: 'Home again — good to have you 💚' },
+];
+
+function showWelcomeBack() {
+  let visits = 2;
+  try {
+    visits = parseInt(localStorage.getItem('handmesh_visits') || '1', 10) + 1;
+    localStorage.setItem('handmesh_visits', String(visits));
+  } catch (e) { /* private mode — just show the base greeting */ }
+
+  const tier = WELCOME_TIERS.find(t => visits >= t.min && visits <= t.max) || WELCOME_TIERS[0];
+  const el = document.getElementById('welcomeBack');
+  document.getElementById('welcomeText').textContent = tier.text;
+  document.getElementById('welcomeSub').textContent = `\u00B7 session #${visits}`;
+
+  requestAnimationFrame(() => el.classList.add('show'));
+  const dismiss = () => el.classList.remove('show');
+  el.addEventListener('click', dismiss, { once: true });
+  setTimeout(dismiss, 3200);
+}
 
 init().catch(err => {
   hud.textContent = "error: " + err.message;
