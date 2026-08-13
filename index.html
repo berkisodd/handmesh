@@ -163,6 +163,22 @@
     font-size:20px; line-height:1; padding:6px; -webkit-tap-highlight-color:transparent;
   }
 
+  /* ---------------- welcome back (returning users) ---------------- */
+  #welcomeBack {
+    position:absolute; left:50%; top:calc(56px + env(safe-area-inset-top)); z-index:7;
+    transform:translateX(-50%) translateY(-8px) scale(0.96);
+    display:flex; align-items:baseline; gap:8px;
+    background:rgba(9,13,11,0.9); border:1px solid rgba(124,255,158,0.35);
+    border-radius:999px; padding:8px 16px;
+    opacity:0; pointer-events:none;
+    transition: opacity .35s ease, transform .35s ease;
+    -webkit-tap-highlight-color:transparent;
+    white-space:nowrap; max-width:calc(100vw - 32px); overflow:hidden;
+  }
+  #welcomeBack.show { opacity:1; transform:translateX(-50%) translateY(0) scale(1); pointer-events:auto; }
+  #welcomeText { color:#EAFFF1; font-size:13.5px; font-weight:600; }
+  #welcomeSub { color:#7CFF9E; font-size:11.5px; opacity:0.7; }
+
   /* ---------------- onboarding walkthrough ---------------- */
   .onboard-overlay {
     position:absolute; inset:0; z-index:50; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px);
@@ -340,6 +356,11 @@
   <div id="dataPanel" class="sheet">
     <div class="sheet-handle"></div>
     <pre id="dataOut">waiting for hands…</pre>
+  </div>
+
+  <div id="welcomeBack">
+    <span id="welcomeText"></span>
+    <span id="welcomeSub"></span>
   </div>
 
   <div id="onboarding" class="onboard-overlay">
@@ -1723,7 +1744,10 @@ function showOnboarding() {
 
 function hideOnboarding() {
   onboardEl.classList.remove('show');
-  try { localStorage.setItem('handmesh_onboarded', '1'); } catch (e) { /* private mode — skip persistence */ }
+  try {
+    localStorage.setItem('handmesh_onboarded', '1');
+    localStorage.setItem('handmesh_visits', '1');
+  } catch (e) { /* private mode — skip persistence */ }
 }
 
 onboardNext.addEventListener('click', () => {
