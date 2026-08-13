@@ -156,6 +156,20 @@
   .err-code-id { color:#7CFF9E; font-weight:700; font-family: ui-monospace, monospace; }
   .err-code-title { color:#EAFFF1; font-weight:600; }
   .err-code-meaning { color:#9FB8AA; line-height:1.4; }
+
+  /* ---------------- what's new ---------------- */
+  .whatsnew-card { max-height:80vh; max-height:80dvh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  #whatsNewList { text-align:left; }
+  .wn-season {
+    color:#7CFF9E; font-size:12px; font-weight:700; letter-spacing:0.03em;
+    text-transform:uppercase; margin:16px 0 8px;
+  }
+  .wn-season:first-child { margin-top:0; }
+  .wn-item {
+    display:flex; gap:8px; align-items:flex-start; color:#CDEFD9;
+    font-size:13.5px; line-height:1.45; margin-bottom:8px;
+  }
+  .wn-item::before { content:'\2022'; color:#46FF82; flex:0 0 auto; }
   #dataOut {
     color:#7CFF9E; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size:10.5px; line-height:1.5; margin:0;
@@ -346,6 +360,8 @@
         <option value="glow">Glow pulse</option>
         <option value="particles">Particles</option>
         <option value="scan">Scanline</option>
+        <option value="bouncy">Bouncy</option>
+        <option value="pro">Professional</option>
         <option value="outline">Outline only</option>
       </select>
     </div>
@@ -414,6 +430,25 @@
   <div id="welcomeBack">
     <span id="welcomeText"></span>
     <span id="welcomeSub"></span>
+  </div>
+
+  <div id="whatsNew" class="onboard-overlay">
+    <div class="onboard-card whatsnew-card">
+      <button id="whatsNewClose" class="onboard-skip">Done</button>
+      <svg width="36" height="36" viewBox="0 0 512 512" style="display:block; margin:0 auto 10px;">
+        <g fill="none" stroke="url(#obLogoGreen)" stroke-width="26" stroke-linecap="round">
+          <path d="M 108 196 L 108 132 L 172 132"/>
+          <path d="M 340 132 L 404 132 L 404 196"/>
+          <path d="M 404 316 L 404 380 L 340 380"/>
+          <path d="M 172 380 L 108 380 L 108 316"/>
+        </g>
+        <circle cx="222" cy="256" r="17" fill="#EAFFF1"/>
+        <circle cx="290" cy="256" r="17" fill="#EAFFF1"/>
+      </svg>
+      <h3 style="text-align:center; color:#EAFFF1; margin:0 0 4px;">What's new</h3>
+      <p style="text-align:center; color:#7CFF9E; font-size:12px; opacity:0.8; margin:0 0 16px;">While you were away</p>
+      <div id="whatsNewList"></div>
+    </div>
   </div>
 
   <div id="onboarding" class="onboard-overlay">
@@ -533,6 +568,27 @@ const LANDMARK_NAMES = [
   'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'
 ];
 
+// Changelog: append a new entry here whenever a feature is added. version is
+// a simple incrementing integer, not tied to any external release process —
+// it's just "has the user seen up to this point." season is a human label
+// shown as a section header when several updates land around the same time.
+const CHANGELOG = [
+  { version: 1, season: 'Summer 2026', date: '2026-08-13', items: [
+    'Recording now includes microphone audio, with a toggle to mute it',
+    '60 second recording limit, with a warning in the final 5 seconds',
+    'Three new effects: Glow pulse, Particles, Scanline',
+    'Bouncy effect — real spring physics on the box, with squash and stretch',
+    'Professional effect — clean technical/CAD-style frame with corner ticks and live dimensions',
+    '3D twist now tracks your hands\u2019 real rotation and actually tangles the box',
+    'Fixed a black screen on iPhone in 3D view',
+    'Fixed 3D view being shrunk on tall phone screens',
+    'Low light and poor tracking warnings',
+    'Error codes with plain-English meanings, viewable in Settings',
+    'Mobile layout fixes across iPhone, iPad, and desktop',
+  ]},
+];
+const CURRENT_VERSION = CHANGELOG[0].version;
+
 const DEFAULTS = {
   viewMode: 'camera', // 'camera' | '3d'
   depthMode: 'shade',
@@ -557,6 +613,10 @@ let fxCanvas, fxCtx, maskLow, maskCtx;
 let smoothedCorners = null;
 let particles = [];
 const MAX_PARTICLES = 70;
+
+// --- bouncy effect: simple spring-damper on box center/size, so the shape
+// actually overshoots and settles instead of just decorating a static box.
+let bouncyState = null; // { cx, cy, w, h, vcx, vcy, vw, vh }
 
 // --- environment/tracking quality warnings ---
 let lumaCanvas = null, lumaCtx = null;
@@ -1640,10 +1700,113 @@ function drawScanEffect(poly) {
   ctx.stroke();
 }
 
+// Real spring-damper physics on the box's center and size — not just a
+// decorative pulse. When your hands move the box, this target changes
+// instantly but the rendered box lags behind with velocity and overshoots
+// past the target before settling, like a rubber band snapping to place.
+function drawBouncyEffect(poly) {
+  const xs = poly.map(p => p.x), ys = poly.map(p => p.y);
+  const targetCx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const targetCy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const targetW = Math.max(...xs) - Math.min(...xs);
+  const targetH = Math.max(...ys) - Math.min(...ys);
+
+  if (!bouncyState) {
+    bouncyState = { cx: targetCx, cy: targetCy, w: targetW, h: targetH, vcx: 0, vcy: 0, vw: 0, vh: 0 };
+  }
+  const s = bouncyState;
+  const stiffness = 210, damping = 12; // underdamped on purpose — this is what produces the overshoot
+  const dt = Math.min(0.05, 1 / 60);
+
+  const spring = (pos, vel, target) => {
+    const accel = (target - pos) * stiffness - vel * damping;
+    const nvel = vel + accel * dt;
+    return [pos + nvel * dt, nvel];
+  };
+  [s.cx, s.vcx] = spring(s.cx, s.vcx, targetCx);
+  [s.cy, s.vcy] = spring(s.cy, s.vcy, targetCy);
+  [s.w, s.vw] = spring(s.w, s.vw, targetW);
+  [s.h, s.vh] = spring(s.h, s.vh, targetH);
+
+  // squash-and-stretch: fast-moving box compresses slightly along its motion,
+  // classic animation-principle touch that reads as "springy" rather than just "delayed"
+  const speed = Math.hypot(s.vcx, s.vcy);
+  const squash = Math.max(0, 1 - Math.min(speed / 2400, 0.18));
+
+  const hw = (s.w / 2) * squash, hh = (s.h / 2) / squash;
+  const bouncyPoly = [
+    { x: s.cx - hw, y: s.cy - hh },
+    { x: s.cx + hw, y: s.cy - hh },
+    { x: s.cx + hw, y: s.cy + hh },
+    { x: s.cx - hw, y: s.cy + hh },
+  ];
+
+  fillDimInterior(bouncyPoly, settings.opacity * 0.3);
+
+  tracePath(ctx, bouncyPoly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.95);
+  ctx.lineWidth = 3.5;
+  ctx.stroke();
+
+  // corner dots ride along, give a bit of bounce personality on their own
+  ctx.fillStyle = hexToRgba(settings.frameColor, 0.9);
+  for (const p of bouncyPoly) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Crisp, restrained, technical-drawing look: double-line border, corner tick
+// marks, and a live width/height readout — no overshoot or easing anywhere,
+// deliberately the opposite feel from Bouncy.
+function drawProfessionalEffect(poly) {
+  const xs = poly.map(p => p.x), ys = poly.map(p => p.y);
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const c = hexToRgba(settings.frameColor, Math.max(settings.opacity, 0.55));
+
+  tracePath(ctx, poly);
+  ctx.strokeStyle = c;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.save();
+  tracePath(ctx, poly);
+  ctx.clip();
+  ctx.strokeStyle = hexToRgba(settings.frameColor, settings.opacity * 0.25);
+  ctx.lineWidth = 1;
+  ctx.setLineDash([1, 5]);
+  const inset = 8;
+  ctx.strokeRect(left + inset, top + inset, (right - left) - inset * 2, (bottom - top) - inset * 2);
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // corner tick marks, like technical/CAD viewport annotations
+  const tick = 14;
+  ctx.strokeStyle = c;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(left, top + tick); ctx.lineTo(left, top); ctx.lineTo(left + tick, top);
+  ctx.moveTo(right - tick, top); ctx.lineTo(right, top); ctx.lineTo(right, top + tick);
+  ctx.moveTo(right, bottom - tick); ctx.lineTo(right, bottom); ctx.lineTo(right - tick, bottom);
+  ctx.moveTo(left + tick, bottom); ctx.lineTo(left, bottom); ctx.lineTo(left, bottom - tick);
+  ctx.stroke();
+
+  // live dimension readout — steady text, no motion, reinforces the restrained feel
+  const w = Math.round(right - left), h = Math.round(bottom - top);
+  ctx.font = '600 11px ui-monospace, monospace';
+  ctx.fillStyle = c;
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`${w}\u00D7${h}`, left, top - 6);
+}
+
 function drawFrameEffect(poly) {
   if (settings.effectStyle === 'glow') { drawGlowEffect(poly); return; }
   if (settings.effectStyle === 'particles') { drawParticleEffect(poly); return; }
   if (settings.effectStyle === 'scan') { drawScanEffect(poly); return; }
+  if (settings.effectStyle === 'bouncy') { drawBouncyEffect(poly); return; }
+  if (settings.effectStyle === 'pro') { drawProfessionalEffect(poly); return; }
 
   const tint = hexToRgba(settings.frameColor, settings.opacity);
 
@@ -1761,6 +1924,7 @@ function renderCamera(handRes) {
   } else {
     smoothedCorners = null;
     if (particles.length) particles = [];
+    bouncyState = null;
   }
 
   if (settings.showSkeleton) {
@@ -1979,9 +2143,42 @@ document.getElementById('helpBtn').addEventListener('click', showOnboarding);
 // Shown once per browser on first visit; runs independently of camera/model
 // loading so it's useful reading time rather than a blocking step.
 try {
-  if (!localStorage.getItem('handmesh_onboarded')) showOnboarding();
-  else showWelcomeBack();
-} catch (e) { /* localStorage unavailable — just skip both */ }
+  if (!localStorage.getItem('handmesh_onboarded')) {
+    showOnboarding();
+    localStorage.setItem('handmesh_seen_version', String(CURRENT_VERSION)); // first-timers see it all live, no need to also show a changelog
+  } else {
+    showWelcomeBack();
+    maybeShowWhatsNew();
+  }
+} catch (e) { /* localStorage unavailable — just skip all of it */ }
+
+/* ---------------- what's new (changelog) ---------------- */
+// Separate from the welcome-back pill on purpose: welcome-back is a quick
+// acknowledgment every visit, this only appears when there's actually
+// something new since the person was last here, and lists what it is.
+
+function maybeShowWhatsNew() {
+  let seen = 0;
+  try { seen = parseInt(localStorage.getItem('handmesh_seen_version') || '0', 10); } catch (e) { return; }
+  if (seen >= CURRENT_VERSION) return;
+
+  const newEntries = CHANGELOG.filter(e => e.version > seen);
+  if (!newEntries.length) return;
+
+  const listEl = document.getElementById('whatsNewList');
+  listEl.innerHTML = newEntries.map(entry => `
+    <div class="wn-season">${entry.season}</div>
+    ${entry.items.map(item => `<div class="wn-item">${item}</div>`).join('')}
+  `).join('');
+
+  // Don't stack on top of the welcome-back pill — give it a beat to be seen first.
+  setTimeout(() => document.getElementById('whatsNew').classList.add('show'), 900);
+}
+
+document.getElementById('whatsNewClose').addEventListener('click', () => {
+  document.getElementById('whatsNew').classList.remove('show');
+  try { localStorage.setItem('handmesh_seen_version', String(CURRENT_VERSION)); } catch (e) { /* private mode */ }
+});
 
 /* ---------------- welcome back (returning users) ---------------- */
 // Distinct from the onboarding modal on purpose: no tutorial, nothing to
