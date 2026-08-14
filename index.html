@@ -442,7 +442,7 @@
       <label><input type="checkbox" id="hapticsEnabled" checked> Haptic feedback (Android only)</label>
     </div>
     <p style="color:#7CFF9E; opacity:0.6; font-size:11.5px; margin:-6px 0 12px; line-height:1.4;">
-      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset &middot; pinch one hand while the other is open to point-and-pick with a wheel, then blink (or pinch) to confirm
+      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset &middot; pinch one hand while the other is open to point-and-pick with a wheel, then blink and hold to confirm
     </p>
     <button id="resetBtn">Reset to defaults</button>
 
@@ -669,7 +669,8 @@ const CHANGELOG = [
     'Gesture sounds and haptic feedback (haptics work on Android; iOS Safari doesn\u2019t support web vibration at all, so no feeling there, just sound)',
     'Wheel pointing needs far less physical movement now \u2014 no more twisting your whole wrist to reach a wedge',
     'The pause before the frame comes back after a gesture is now under half a second, down from nearly two',
-    'Wheel selections can now be confirmed by blinking and holding your eyes closed briefly \u2014 pinch still works too, as a backup',
+    'Wheel selections are now confirmed by blinking and holding your eyes closed briefly \u2014 no pinching involved',
+    'A clear notification now pops up the moment the wheel opens, since the frame disappearing at the same time was easy to miss',
     'The wheel now shows a full list of its controls instead of one small hint line',
     'Two new onboarding steps with animated hands showing how to open and use the wheel',
   ]},
@@ -1531,10 +1532,11 @@ let lastRenderTs = performance.now();
 // Single-hand pinch, held, alone: cycles to the next effect. Both hands
 // pinched at once, held: full reset. Single-hand pinch, held, WITH a second
 // open (non-pinching) hand present: opens a radial wheel instead of cycling —
-// point that second hand's index finger at a wedge to highlight an effect
-// directly, pinch it to confirm, or just let go of the trigger hand to cancel.
-// Pinch distance is normalized by hand scale (wrist to middle knuckle) so the
-// threshold works the same whether your hand is close to the camera or far.
+// point that second hand's index finger at a wedge to highlight an effect,
+// then blink and hold to confirm it, or just let go of the trigger hand to
+// cancel. Pinch distance is normalized by hand scale (wrist to middle
+// knuckle) so the threshold works the same whether your hand is close to the
+// camera or far.
 const PINCH_RATIO = 0.32;
 const GESTURE_HOLD_MS = 700;
 const DOUBLE_GRACE_MS = 260;  // window after one hand qualifies, to see if the other joins for a double or a wheel
@@ -1626,13 +1628,15 @@ function fireReset() {
   showGestureToast('Reset to defaults');
 }
 
-function showGestureToast(text) {
+function showGestureToast(text, durationMs) {
+  durationMs = durationMs || 1400;
   const el = document.getElementById('gestureToast');
   el.textContent = text;
   el.classList.remove('show'); void el.offsetWidth; // restart animation if triggered again quickly
+  el.style.animationDuration = durationMs + 'ms';
   el.classList.add('show');
   clearTimeout(showGestureToast._t);
-  showGestureToast._t = setTimeout(() => el.classList.remove('show'), 1400);
+  showGestureToast._t = setTimeout(() => el.classList.remove('show'), durationMs);
 }
 
 function openWheel(triggerLabel, triggerHand) {
@@ -1651,13 +1655,16 @@ function openWheel(triggerLabel, triggerHand) {
   };
   playWheelOpen();
   vibrate(12);
-  ensureFaceLandmarker(); // fire-and-forget — pinch-to-confirm still works immediately even before this finishes loading
+  showGestureToast('Wheel open \u00B7 point & blink to pick', 2200);
+  ensureFaceLandmarker(); // fire-and-forget — face tracking can keep loading after the wheel is already up
 }
 
 // Lazy-loaded, same pattern as ensureThree() for the 3D viewport: only pulled
-// in when actually needed, cached after first load. If it fails for any
-// reason (network, unsupported browser), the wheel still works fine via
-// pinch-to-confirm — blink is additive, never a hard requirement.
+// in when actually needed, cached after first load. Blink is the only confirm
+// path now, so if this fails to load (network issue, unsupported browser),
+// the wheel can still be opened and aimed but can't be confirmed — only
+// cancelled by releasing the trigger hand. That's an accepted tradeoff for
+// keeping the interaction purely eyes-and-hands, no pinch involved.
 async function ensureFaceLandmarker() {
   if (faceLandmarker || faceLandmarkerLoading || faceTrackingFailed || !visionFileset) return;
   faceLandmarkerLoading = true;
@@ -1671,7 +1678,7 @@ async function ensureFaceLandmarker() {
       numFaces: 1
     });
   } catch (err) {
-    console.warn('Face tracking unavailable, blink-to-confirm disabled — pinch still works:', err);
+    console.warn('Face tracking unavailable — blink-to-confirm will not work this session:', err);
     faceTrackingFailed = true;
   } finally {
     faceLandmarkerLoading = false;
@@ -1741,7 +1748,7 @@ function drawWheel() {
   // wheel is open so it's never a mystery what your hands (and eyes) do here.
   const lines = [
     'Point with your other hand to aim',
-    'Blink and hold, or pinch, to pick',
+    'Blink and hold to pick',
     'Let go of the pinch to cancel'
   ];
   const lineH = 18;
@@ -1843,14 +1850,12 @@ function updateWheel(present, now) {
     drawBlinkProgress(Math.min(1, blinkHeldMs / EYE_HOLD_MS));
   }
 
-  // Pinch is kept as a fallback confirm path — face tracking can fail to load,
-  // a face can be out of frame, lighting can throw off blink detection, and
-  // not everyone finds a deliberate blink-hold comfortable. Whichever happens
-  // first wins.
-  const pinchConfirm = ptr && ptr.pinched && wheelState.selectedIndex >= 0;
+  // Blink is the only way to confirm — the trigger hand's pinch stays required
+  // to keep the wheel open (and releasing it still cancels), but the pointer
+  // hand's pinch state no longer has any effect here, only its aim.
   const blinkConfirm = blinkReady && wheelState.selectedIndex >= 0;
 
-  if (pinchConfirm || blinkConfirm) {
+  if (blinkConfirm) {
     playWheelConfirm();
     vibrate([16, 24, 34]);
     applyEffectByIndex(wheelState.selectedIndex);
@@ -2579,7 +2584,7 @@ function renderCamera(handRes) {
       hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), false));
     }
     drawWatermark();
-    hud.textContent = 'Point to aim \u00B7 blink or pinch to pick';
+    hud.textContent = 'Point to aim \u00B7 blink to pick';
     updateDataPanel(hands, handedness, null, 0);
     return;
   }
@@ -2840,7 +2845,7 @@ const ONBOARD_STEPS = [
   { title: 'Hit record', desc: 'Tap the shutter to capture your moves, with a live timer.', visual: 3 },
   { title: '3D data view', desc: 'Tap the cube to see the raw hands and box floating in real 3D space.', visual: 4 },
   { title: 'Open the wheel', desc: 'Pinch and hold one hand while keeping the other open to bring up a radial menu.', visual: 6 },
-  { title: 'Point and pick', desc: 'Aim with your open hand to highlight an effect, then blink and hold (or pinch) to pick it.', visual: 7 }
+  { title: 'Point and pick', desc: 'Aim with your open hand to highlight an effect, then blink and hold to pick it.', visual: 7 }
 ];
 
 let obIndex = 0;
