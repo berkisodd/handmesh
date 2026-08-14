@@ -219,6 +219,25 @@
   #qualityIcon { font-size:13px; flex:0 0 auto; }
   #qualityText { color:#FFD98A; font-size:12.5px; font-weight:600; }
 
+  /* ---------------- gesture command confirmation ---------------- */
+  #gestureToast {
+    position:absolute; left:50%; top:38%; z-index:9;
+    transform:translate(-50%,-50%) scale(0.85);
+    background:rgba(9,13,11,0.92); border:1px solid rgba(124,255,158,0.5);
+    border-radius:999px; padding:10px 20px;
+    color:#EAFFF1; font-size:14px; font-weight:700;
+    opacity:0; pointer-events:none;
+    box-shadow:0 8px 24px rgba(0,0,0,0.4);
+  }
+  #gestureToast.show { animation: gesturePop 1.4s ease forwards; }
+  @keyframes gesturePop {
+    0% { opacity:0; transform:translate(-50%,-50%) scale(0.8); }
+    15% { opacity:1; transform:translate(-50%,-50%) scale(1.05); }
+    25% { transform:translate(-50%,-50%) scale(1); }
+    80% { opacity:1; }
+    100% { opacity:0; transform:translate(-50%,-50%) scale(1); }
+  }
+
   /* ---------------- welcome back (returning users) ---------------- */
   #welcomeBack {
     position:absolute; left:50%; top:calc(56px + env(safe-area-inset-top)); z-index:7;
@@ -407,7 +426,11 @@
       <label><input type="checkbox" id="showSkeleton" checked> Show hand skeleton</label>
       <label><input type="checkbox" id="showOutline" checked> Show frame outline / box</label>
       <label><input type="checkbox" id="mirrorToggle" checked> Mirror view</label>
+      <label><input type="checkbox" id="gesturesEnabled" checked> Gesture commands</label>
     </div>
+    <p style="color:#7CFF9E; opacity:0.6; font-size:11.5px; margin:-6px 0 12px; line-height:1.4;">
+      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset
+    </p>
     <button id="resetBtn">Reset to defaults</button>
 
     <button id="errorCodesToggle" class="section-toggle">Error codes ▾</button>
@@ -426,6 +449,8 @@
     <span id="qualityIcon">⚠️</span>
     <span id="qualityText"></span>
   </div>
+
+  <div id="gestureToast"></div>
 
   <div id="welcomeBack">
     <span id="welcomeText"></span>
@@ -587,6 +612,11 @@ const CHANGELOG = [
     'Mobile layout fixes across iPhone, iPad, and desktop',
     'The box no longer disappears instantly when one hand briefly leaves frame — it holds for about a second before clearing',
     'A hand no longer drops out just because one unrelated finger (like the pinky) is off-frame or occluded — thumb and index are what actually matter',
+    'Fixed the box occasionally snapping to a wrong shape when a corner rotated past a certain angle',
+    'Smoothing now feels the same on every device instead of varying with frame rate',
+    'Crossing your hands no longer swaps their colors or reorders the box corners',
+    'Depth and tilt readings are smoothed properly, so shading no longer flickers on a steady box',
+    'Gesture commands: pinch one hand and hold to cycle effects, pinch both hands together and hold to reset',
   ]},
 ];
 const CURRENT_VERSION = CHANGELOG[0].version;
@@ -606,7 +636,8 @@ const DEFAULTS = {
   skeletonMode: 'two-tone',
   showSkeleton: true,
   showOutline: true,
-  mirror: true
+  mirror: true,
+  gesturesEnabled: true
 };
 const settings = { ...DEFAULTS };
 
@@ -1292,7 +1323,7 @@ function drawWatermark() {
 function render3D(handRes) {
   const raw = handRes.landmarks || [];
   const handedRaw = handRes.handednesses || handRes.handedness || [];
-  const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
+  const order = orderHands(raw, handedRaw);
   const hands = order.map(i => raw[i]);
   const handedness = order.map(i => handedRaw[i]);
   updateQualityWarning(handedness);
@@ -1379,6 +1410,7 @@ function render3D(handRes) {
       smoothedTwist = null;
       lastKnownTips3d = null;
       missingHandFrames3d = 0;
+      lastQuadAnchor = null;
     }
   }
 
@@ -1404,6 +1436,105 @@ function render3D(handRes) {
 let lastVideoTime = -1;
 let lastRafTs = performance.now();
 let fps = 0, detectMs = 0;
+let lastQuadAnchor = null;   // keeps corner index assignment stable across frames
+let lastFrameDelta = 16.7;   // ms since the previous rendered frame
+let lastRenderTs = performance.now();
+
+// --- gesture commands ---
+// Single-hand pinch, held: cycles to the next effect. Both hands pinched at
+// once, held: full reset. Pinch distance is normalized by hand scale (wrist to
+// middle knuckle) so the threshold works the same whether your hand is close
+// to the camera or far from it.
+const PINCH_RATIO = 0.32;
+const GESTURE_HOLD_MS = 450;
+const DOUBLE_GRACE_MS = 180;  // window after one hand qualifies, to see if the other joins for a double
+const GESTURE_COOLDOWN_MS = 550;
+const EFFECT_CYCLE = ['invert', 'solid', 'cycle', 'glow', 'particles', 'scan', 'bouncy', 'pro', 'outline'];
+let pinchState = {};          // label -> { start, readyAt, fired }
+let gestureCooldownUntil = 0;
+
+function handScale(h) {
+  const a = h[0], b = h[9]; // wrist -> middle knuckle, same stable reference used for roll
+  return Math.hypot(b.x - a.x, b.y - a.y) || 1e-4;
+}
+function pinchAmount(h) {
+  const a = h[4], b = h[8];
+  return Math.hypot(b.x - a.x, b.y - a.y) / handScale(h);
+}
+
+function fireCycleEffect() {
+  const sel = document.getElementById('effectStyle');
+  const idx = EFFECT_CYCLE.indexOf(settings.effectStyle);
+  const next = EFFECT_CYCLE[(idx + 1 + EFFECT_CYCLE.length) % EFFECT_CYCLE.length];
+  sel.value = next;
+  sel.dispatchEvent(new Event('change')); // reuses the existing handler, keeps UI/state/particle-clearing in sync
+  showGestureToast(`Effect \u00B7 ${sel.options[sel.selectedIndex].textContent}`);
+}
+
+function fireReset() {
+  document.getElementById('resetBtn').click(); // reuses the existing reset logic exactly
+  showGestureToast('Reset to defaults');
+}
+
+function showGestureToast(text) {
+  const el = document.getElementById('gestureToast');
+  el.textContent = text;
+  el.classList.remove('show'); void el.offsetWidth; // restart animation if triggered again quickly
+  el.classList.add('show');
+  clearTimeout(showGestureToast._t);
+  showGestureToast._t = setTimeout(() => el.classList.remove('show'), 1400);
+}
+
+function updateGestures(hands, handedness) {
+  if (!settings.gesturesEnabled) { pinchState = {}; return; }
+  const now = performance.now();
+  const seenLabels = new Set();
+
+  for (let i = 0; i < hands.length; i++) {
+    const label = handedness[i]?.[0]?.categoryName;
+    if (!label) continue;
+    seenLabels.add(label);
+
+    const isPinched = pinchAmount(hands[i]) < PINCH_RATIO;
+    let st = pinchState[label];
+    if (!isPinched) { delete pinchState[label]; continue; }
+    if (!st) { st = pinchState[label] = { start: now, readyAt: null, fired: false }; }
+    if (!st.readyAt && now - st.start >= GESTURE_HOLD_MS) st.readyAt = now;
+
+    // progress ring while holding, for visible feedback before it actually fires
+    if (!st.fired) {
+      const held = now - st.start;
+      const progress = Math.min(1, held / GESTURE_HOLD_MS);
+      const mid = { x: (toPx(hands[i][4]).x + toPx(hands[i][8]).x) / 2, y: (toPx(hands[i][4]).y + toPx(hands[i][8]).y) / 2 };
+      ctx.save();
+      ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(mid.x, mid.y, 16, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  for (const label of Object.keys(pinchState)) {
+    if (!seenLabels.has(label)) delete pinchState[label];
+  }
+
+  if (now < gestureCooldownUntil) return;
+
+  const readyUnfired = Object.entries(pinchState).filter(([, s]) => s.readyAt && !s.fired);
+  if (readyUnfired.length === 2) {
+    readyUnfired.forEach(([, s]) => s.fired = true);
+    gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
+    fireReset();
+  } else if (readyUnfired.length === 1) {
+    const [, s] = readyUnfired[0];
+    if (now - s.readyAt >= DOUBLE_GRACE_MS) {
+      s.fired = true;
+      gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
+      fireCycleEffect();
+    }
+  }
+}
 
 function loop(ts) {
   const dt = ts - lastRafTs;
@@ -1424,6 +1555,13 @@ function loop(ts) {
 
   if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
+    // Measured between rendered frames specifically, since rendering is gated
+    // on new camera frames — a 30fps camera on a 60Hz display renders every
+    // other tick, and smoothing/physics need the real interval.
+    const now = performance.now();
+    lastFrameDelta = now - lastRenderTs;
+    lastRenderTs = now;
+
     const t0 = performance.now();
     const handRes = handLandmarker.detectForVideo(video, ts);
     detectMs = detectMs * 0.9 + (performance.now() - t0) * 0.1;
@@ -1450,9 +1588,26 @@ function buildQuad(tipPoints) {
   const cx = tipPoints.reduce((s, p) => s + p.x, 0) / tipPoints.length;
   const cy = tipPoints.reduce((s, p) => s + p.y, 0) / tipPoints.length;
 
-  const ordered = tipPoints
-    .map(p => ({ ...p, ang: Math.atan2(p.y - cy, p.x - cx) }))
-    .sort((a, b) => a.ang - b.ang);
+  // Sorting purely by atan2 has no fixed start point, so when a corner crosses
+  // the +/-180 boundary the whole array rotates by one index. Smoothing blends
+  // by index, so that rotation made corner 0 suddenly chase corner 3's old
+  // position — a visible snap. Anchoring the sort to a stable reference angle
+  // (carried over from the previous frame) keeps index assignment consistent.
+  const withAng = tipPoints.map(p => ({ ...p, ang: Math.atan2(p.y - cy, p.x - cx) }));
+
+  if (lastQuadAnchor === null) {
+    lastQuadAnchor = withAng.reduce((min, p) => p.ang < min ? p.ang : min, Infinity);
+  }
+  const anchor = lastQuadAnchor;
+  const rel = a => {
+    let d = a - anchor;
+    while (d < 0) d += Math.PI * 2;
+    while (d >= Math.PI * 2) d -= Math.PI * 2;
+    return d;
+  };
+  const ordered = withAng.sort((a, b) => rel(a.ang) - rel(b.ang));
+  // Carry the first corner's angle forward so next frame keeps the same start.
+  lastQuadAnchor = ordered[0].ang;
 
   const zs = ordered.map(p => p.z);
   const zMin = Math.min(...zs), zMax = Math.max(...zs);
@@ -1484,13 +1639,40 @@ function smoothCorners(corners) {
     smoothedCorners = corners.map(p => ({ ...p }));
     return smoothedCorners;
   }
+
+  // Frame-rate independent EMA. A fixed alpha per frame means the same slider
+  // value smooths twice as hard at 60fps as at 30fps, and gets erratic whenever
+  // frames drop. Rescaling by actual elapsed time keeps the feel identical
+  // across devices and through stutters.
+  const dt = Math.max(1, Math.min(100, lastFrameDelta)) / 1000;
+  const k = Math.pow(a, dt * 60); // a is calibrated at 60fps
+
   smoothedCorners = smoothedCorners.map((prev, i) => ({
-    x: prev.x * a + corners[i].x * (1 - a),
-    y: prev.y * a + corners[i].y * (1 - a),
-    z: corners[i].z,
-    depth: prev.depth * a + corners[i].depth * (1 - a)
+    x: prev.x * k + corners[i].x * (1 - k),
+    y: prev.y * k + corners[i].y * (1 - k),
+    // z was previously passed through raw while depth was smoothed — that made
+    // depth shading and tilt readings jitter even when the box looked steady.
+    z: prev.z * k + corners[i].z * (1 - k),
+    depth: prev.depth * k + corners[i].depth * (1 - k)
   }));
   return smoothedCorners;
+}
+
+// Ordering hands by wrist x means crossing your hands swaps the two slots —
+// skeleton colours flip and the tip array reorders mid-gesture. MediaPipe
+// already reports which hand is which, so key off that instead and only fall
+// back to position when the label is missing.
+function orderHands(raw, handedRaw) {
+  const idx = raw.map((h, i) => i);
+  const labelOf = i => handedRaw[i]?.[0]?.categoryName || null;
+  if (idx.every(i => labelOf(i))) {
+    return idx.sort((a, b) => {
+      const la = labelOf(a), lb = labelOf(b);
+      if (la === lb) return raw[a][0].x - raw[b][0].x;
+      return la === 'Left' ? -1 : 1;
+    });
+  }
+  return idx.sort((a, b) => raw[a][0].x - raw[b][0].x);
 }
 
 function polygonArea(pts) {
@@ -1765,7 +1947,10 @@ function drawBouncyEffect(poly) {
   }
   const s = bouncyState;
   const stiffness = 210, damping = 12; // underdamped on purpose — this is what produces the overshoot
-  const dt = Math.min(0.05, 1 / 60);
+  // Real elapsed time, clamped for stability. Was hardcoded to 1/60 but this
+  // only steps when a camera frame arrives (~30fps), so the spring ran at
+  // roughly half the intended speed and felt sluggish.
+  const dt = Math.min(0.05, Math.max(0.001, lastFrameDelta / 1000));
 
   const spring = (pos, vel, target) => {
     const accel = (target - pos) * stiffness - vel * damping;
@@ -1954,10 +2139,11 @@ function renderCamera(handRes) {
 
   const raw = handRes.landmarks || [];
   const handedRaw = handRes.handednesses || handRes.handedness || [];
-  const order = raw.map((h, i) => i).sort((a, b) => raw[a][0].x - raw[b][0].x);
+  const order = orderHands(raw, handedRaw);
   const hands = order.map(i => raw[i]);
   const handedness = order.map(i => handedRaw[i]);
   updateQualityWarning(handedness);
+  updateGestures(hands, handedness);
 
   const twoHands = hands.length >= 2;
   const oneHand = hands.length === 1;
@@ -2001,6 +2187,7 @@ function renderCamera(handRes) {
     bouncyState = null;
     lastKnownTips = null;
     missingHandFrames = 0;
+    lastQuadAnchor = null;
   }
 
   if (settings.showSkeleton) {
@@ -2129,6 +2316,10 @@ function bindControls() {
   $('showSkeleton').addEventListener('change', e => settings.showSkeleton = e.target.checked);
   $('showOutline').addEventListener('change', e => settings.showOutline = e.target.checked);
   $('mirrorToggle').addEventListener('change', e => { settings.mirror = e.target.checked; });
+  $('gesturesEnabled').addEventListener('change', e => {
+    settings.gesturesEnabled = e.target.checked;
+    pinchState = {};
+  });
 
   $('resetBtn').addEventListener('click', () => {
     const keepViewMode = settings.viewMode; // don't force user back to camera mode on reset
@@ -2157,6 +2348,7 @@ function bindControls() {
     $('showSkeleton').checked = true;
     $('showOutline').checked = true;
     $('mirrorToggle').checked = true;
+    $('gesturesEnabled').checked = true;
     $('includeAudio').checked = true;
     if (cameraStream) cameraStream.getAudioTracks().forEach(t => { t.enabled = true; });
     micStatus.textContent = hasAudio ? '🎤' : '🔇';
