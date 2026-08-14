@@ -429,7 +429,7 @@
       <label><input type="checkbox" id="gesturesEnabled" checked> Gesture commands</label>
     </div>
     <p style="color:#7CFF9E; opacity:0.6; font-size:11.5px; margin:-6px 0 12px; line-height:1.4;">
-      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset
+      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset &middot; pinch one hand while the other is open to point-and-pick with a wheel
     </p>
     <button id="resetBtn">Reset to defaults</button>
 
@@ -617,6 +617,9 @@ const CHANGELOG = [
     'Crossing your hands no longer swaps their colors or reorders the box corners',
     'Depth and tilt readings are smoothed properly, so shading no longer flickers on a steady box',
     'Gesture commands: pinch one hand and hold to cycle effects, pinch both hands together and hold to reset',
+    'Fixed a phantom box corner appearing near your face when only one hand is up',
+    'Gesture pinches now need a longer, more deliberate hold before they fire',
+    'New gesture: pinch one hand while the other is open to bring up a radial wheel \u2014 point at an effect with your other hand and pinch to pick it directly',
   ]},
 ];
 const CURRENT_VERSION = CHANGELOG[0].version;
@@ -662,6 +665,10 @@ let missingHandFrames = 0;
 const HOLD_FRAMES = 24;        // ~0.8s at 30fps grace period before the box actually clears
 let lastKnownTips3d = null;    // same idea, tracked separately for the 3D twist box
 let missingHandFrames3d = 0;
+let twoHandConfirmFrames = 0;
+let twoHandConfirmFrames3d = 0;
+const TWO_HAND_CONFIRM_FRAMES = 4;  // consecutive confident frames needed before trusting a 2nd hand as a hold anchor
+const BOX_HOLD_MIN_CONF = 0.55;     // stricter than the model's own 0.35 detection floor, on purpose
 
 // --- environment/tracking quality warnings ---
 let lumaCanvas = null, lumaCtx = null;
@@ -1340,8 +1347,12 @@ function render3D(handRes) {
   if (twoHands && settings.showOutline) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
-    lastKnownTips3d = tips;
-    missingHandFrames3d = 0;
+    const bothConfident3d = handedness.slice(0, 2).every(hd => (hd?.[0]?.score ?? 0) >= BOX_HOLD_MIN_CONF);
+    twoHandConfirmFrames3d = bothConfident3d ? twoHandConfirmFrames3d + 1 : 0;
+    if (twoHandConfirmFrames3d >= TWO_HAND_CONFIRM_FRAMES) {
+      lastKnownTips3d = tips;
+      missingHandFrames3d = 0;
+    }
 
     // Roll from wrist(0) -> middle knuckle(9): the hand's spine. The old
     // thumb-tip -> index-tip vector is nearly zero-length while you're making a
@@ -1385,6 +1396,7 @@ function render3D(handRes) {
     // Twist itself freezes rather than resets — a one-handed frame can't
     // meaningfully report rotation, so hold the shape steady instead of
     // untwisting it out from under you.
+    twoHandConfirmFrames3d = 0;
     missingHandFrames3d++;
     const visTips = [toPx(hands[0][4]), toPx(hands[0][8])];
     const visMidX = (visTips[0].x + visTips[1].x) / 2;
@@ -1411,6 +1423,7 @@ function render3D(handRes) {
       lastKnownTips3d = null;
       missingHandFrames3d = 0;
       lastQuadAnchor = null;
+      twoHandConfirmFrames3d = 0;
     }
   }
 
@@ -1441,17 +1454,23 @@ let lastFrameDelta = 16.7;   // ms since the previous rendered frame
 let lastRenderTs = performance.now();
 
 // --- gesture commands ---
-// Single-hand pinch, held: cycles to the next effect. Both hands pinched at
-// once, held: full reset. Pinch distance is normalized by hand scale (wrist to
-// middle knuckle) so the threshold works the same whether your hand is close
-// to the camera or far from it.
+// Single-hand pinch, held, alone: cycles to the next effect. Both hands
+// pinched at once, held: full reset. Single-hand pinch, held, WITH a second
+// open (non-pinching) hand present: opens a radial wheel instead of cycling —
+// point that second hand's index finger at a wedge to highlight an effect
+// directly, pinch it to confirm, or just let go of the trigger hand to cancel.
+// Pinch distance is normalized by hand scale (wrist to middle knuckle) so the
+// threshold works the same whether your hand is close to the camera or far.
 const PINCH_RATIO = 0.32;
-const GESTURE_HOLD_MS = 450;
-const DOUBLE_GRACE_MS = 180;  // window after one hand qualifies, to see if the other joins for a double
+const GESTURE_HOLD_MS = 700;
+const DOUBLE_GRACE_MS = 260;  // window after one hand qualifies, to see if the other joins for a double or a wheel
 const GESTURE_COOLDOWN_MS = 550;
-const EFFECT_CYCLE = ['invert', 'solid', 'cycle', 'glow', 'particles', 'scan', 'bouncy', 'pro', 'outline'];
+const EFFECT_CYCLE  = ['invert', 'solid',  'cycle', 'glow',  'particles', 'scan', 'bouncy', 'pro', 'outline'];
+const EFFECT_LABELS = ['Invert', 'Solid',  'Cycle', 'Glow',  'Particles', 'Scan', 'Bouncy', 'Pro', 'Outline']; // kept in lockstep with EFFECT_CYCLE, same order
+const WHEEL_R_OUTER = 148, WHEEL_R_INNER = 46, WHEEL_DEADZONE = 42;
 let pinchState = {};          // label -> { start, readyAt, fired }
 let gestureCooldownUntil = 0;
+let wheelState = null;        // null when closed, else { triggerLabel, center:{x,y}, selectedIndex, smoothedAngle }
 
 function handScale(h) {
   const a = h[0], b = h[9]; // wrist -> middle knuckle, same stable reference used for roll
@@ -1471,6 +1490,13 @@ function fireCycleEffect() {
   showGestureToast(`Effect \u00B7 ${sel.options[sel.selectedIndex].textContent}`);
 }
 
+function applyEffectByIndex(idx) {
+  const sel = document.getElementById('effectStyle');
+  sel.value = EFFECT_CYCLE[idx];
+  sel.dispatchEvent(new Event('change'));
+  showGestureToast(`Effect \u00B7 ${EFFECT_LABELS[idx]}`);
+}
+
 function fireReset() {
   document.getElementById('resetBtn').click(); // reuses the existing reset logic exactly
   showGestureToast('Reset to defaults');
@@ -1485,17 +1511,135 @@ function showGestureToast(text) {
   showGestureToast._t = setTimeout(() => el.classList.remove('show'), 1400);
 }
 
-function updateGestures(hands, handedness) {
-  if (!settings.gesturesEnabled) { pinchState = {}; return; }
-  const now = performance.now();
-  const seenLabels = new Set();
+function openWheel(triggerLabel, triggerHand) {
+  const mid = { x: (toPx(triggerHand[4]).x + toPx(triggerHand[8]).x) / 2, y: (toPx(triggerHand[4]).y + toPx(triggerHand[8]).y) / 2 };
+  const pad = WHEEL_R_OUTER + 20;
+  wheelState = {
+    triggerLabel,
+    center: { x: Math.min(Math.max(mid.x, pad), canvas.width - pad), y: Math.min(Math.max(mid.y, pad), canvas.height - pad) },
+    selectedIndex: -1,
+    smoothedAngle: null
+  };
+}
 
+function angleToWedge(ang, n, baseAngle) {
+  const segAngle = (Math.PI * 2) / n;
+  let rel = ang - baseAngle;
+  while (rel < 0) rel += Math.PI * 2;
+  while (rel >= Math.PI * 2) rel -= Math.PI * 2;
+  return Math.round(rel / segAngle) % n;
+}
+
+function drawWheel() {
+  const { center, selectedIndex, smoothedAngle } = wheelState;
+  const n = EFFECT_CYCLE.length;
+  const segAngle = (Math.PI * 2) / n;
+  const baseAngle = -Math.PI / 2; // wedge 0 centered at 12 o'clock
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, WHEEL_R_OUTER + 16, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(5,8,10,0.74)';
+  ctx.fill();
+
+  for (let i = 0; i < n; i++) {
+    const mid = baseAngle + i * segAngle;
+    const isSel = i === selectedIndex;
+    const rOut = isSel ? WHEEL_R_OUTER + 8 : WHEEL_R_OUTER;
+    const gap = 0.025;
+
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, rOut, mid - segAngle / 2 + gap, mid + segAngle / 2 - gap);
+    ctx.arc(center.x, center.y, WHEEL_R_INNER, mid + segAngle / 2 - gap, mid - segAngle / 2 + gap, true);
+    ctx.closePath();
+    ctx.fillStyle = isSel ? hexToRgba(settings.frameColor, 0.88) : 'rgba(255,255,255,0.07)';
+    ctx.fill();
+    ctx.strokeStyle = hexToRgba(settings.frameColor, isSel ? 1 : 0.28);
+    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.stroke();
+
+    const labelR = (WHEEL_R_INNER + rOut) / 2;
+    ctx.fillStyle = isSel ? '#06210F' : '#CDEFD9';
+    ctx.font = isSel ? '700 12px -apple-system, system-ui, sans-serif' : '600 11px -apple-system, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(EFFECT_LABELS[i], center.x + Math.cos(mid) * labelR, center.y + Math.sin(mid) * labelR);
+  }
+
+  if (smoothedAngle !== null) {
+    ctx.beginPath();
+    ctx.moveTo(center.x, center.y);
+    ctx.lineTo(center.x + Math.cos(smoothedAngle) * WHEEL_R_INNER, center.y + Math.sin(smoothedAngle) * WHEEL_R_INNER);
+    ctx.strokeStyle = hexToRgba(settings.frameColor, 0.6);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = '#EAFFF1';
+  ctx.fill();
+
+  ctx.font = '500 11px -apple-system, system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(234,255,241,0.65)';
+  ctx.textAlign = 'center';
+  ctx.fillText('pinch to pick \u00B7 let go to cancel', center.x, center.y + WHEEL_R_OUTER + 34);
+
+  ctx.restore();
+}
+
+function updateWheel(present, now) {
+  const trig = present[wheelState.triggerLabel];
+  const pointerLabel = Object.keys(present).find(l => l !== wheelState.triggerLabel);
+  const ptr = pointerLabel ? present[pointerLabel] : null;
+
+  if (ptr) {
+    const tip = toPx(ptr.hand[8]); // index fingertip is the pointer
+    const dx = tip.x - wheelState.center.x, dy = tip.y - wheelState.center.y;
+    if (Math.hypot(dx, dy) > WHEEL_DEADZONE) {
+      const ang = Math.atan2(dy, dx);
+      if (wheelState.smoothedAngle === null) wheelState.smoothedAngle = ang;
+      else {
+        let d = ang - wheelState.smoothedAngle;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        wheelState.smoothedAngle += d * 0.35; // eases direction changes so the highlight doesn't jitter between wedges
+      }
+      wheelState.selectedIndex = angleToWedge(wheelState.smoothedAngle, EFFECT_CYCLE.length, -Math.PI / 2);
+    }
+  }
+
+  drawWheel(); // draw first so a confirming frame still shows the highlighted wedge before closing
+
+  if (ptr && ptr.pinched && wheelState.selectedIndex >= 0) {
+    applyEffectByIndex(wheelState.selectedIndex);
+    wheelState = null;
+    gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
+    return;
+  }
+  if (!trig || !trig.pinched) {
+    wheelState = null; // trigger hand let go or left frame — cancel, no change applied
+    gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
+  }
+}
+
+function updateGestures(hands, handedness) {
+  if (!settings.gesturesEnabled) { pinchState = {}; wheelState = null; return; }
+  const now = performance.now();
+
+  const present = {};
   for (let i = 0; i < hands.length; i++) {
     const label = handedness[i]?.[0]?.categoryName;
     if (!label) continue;
-    seenLabels.add(label);
+    present[label] = { hand: hands[i], pinched: pinchAmount(hands[i]) < PINCH_RATIO };
+  }
 
-    const isPinched = pinchAmount(hands[i]) < PINCH_RATIO;
+  if (wheelState) { updateWheel(present, now); return; }
+
+  const seenLabels = new Set(Object.keys(present));
+  for (const label of seenLabels) {
+    const isPinched = present[label].pinched;
     let st = pinchState[label];
     if (!isPinched) { delete pinchState[label]; continue; }
     if (!st) { st = pinchState[label] = { start: now, readyAt: null, fired: false }; }
@@ -1505,7 +1649,8 @@ function updateGestures(hands, handedness) {
     if (!st.fired) {
       const held = now - st.start;
       const progress = Math.min(1, held / GESTURE_HOLD_MS);
-      const mid = { x: (toPx(hands[i][4]).x + toPx(hands[i][8]).x) / 2, y: (toPx(hands[i][4]).y + toPx(hands[i][8]).y) / 2 };
+      const hand = present[label].hand;
+      const mid = { x: (toPx(hand[4]).x + toPx(hand[8]).x) / 2, y: (toPx(hand[4]).y + toPx(hand[8]).y) / 2 };
       ctx.save();
       ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
       ctx.lineWidth = 3;
@@ -1527,11 +1672,16 @@ function updateGestures(hands, handedness) {
     gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
     fireReset();
   } else if (readyUnfired.length === 1) {
-    const [, s] = readyUnfired[0];
+    const [label, s] = readyUnfired[0];
     if (now - s.readyAt >= DOUBLE_GRACE_MS) {
       s.fired = true;
       gestureCooldownUntil = now + GESTURE_COOLDOWN_MS;
-      fireCycleEffect();
+      const otherLabel = Object.keys(present).find(l => l !== label);
+      if (otherLabel && !present[otherLabel].pinched) {
+        openWheel(label, present[label].hand);
+      } else {
+        fireCycleEffect();
+      }
     }
   }
 }
@@ -2145,6 +2295,18 @@ function renderCamera(handRes) {
   updateQualityWarning(handedness);
   updateGestures(hands, handedness);
 
+  if (wheelState) {
+    // Wheel takes over while open: skip the box entirely, still show the
+    // skeleton (unhighlighted, since there's no active box) and watermark.
+    if (settings.showSkeleton) {
+      hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), false));
+    }
+    drawWatermark();
+    hud.textContent = 'Point to an effect \u00B7 pinch to pick';
+    updateDataPanel(hands, handedness, null, 0);
+    return;
+  }
+
   const twoHands = hands.length >= 2;
   const oneHand = hands.length === 1;
   let poly = null, tilt = 0;
@@ -2152,8 +2314,19 @@ function renderCamera(handRes) {
   if (twoHands) {
     const tips = [];
     for (const h of hands.slice(0, 2)) tips.push(toPx(h[4]), toPx(h[8]));
-    lastKnownTips = tips;
-    missingHandFrames = 0;
+
+    // Only trust this pair enough to anchor the hold-over feature once both
+    // hands clear a stricter confidence bar AND have held for several
+    // consecutive frames. A single noisy frame — e.g. a face or ear briefly
+    // misread as a low-confidence "hand" at the lowered 0.35 detection floor —
+    // could otherwise get saved as a corner and then haunt the box for the
+    // next ~0.8s once you're back down to one real hand.
+    const bothConfident = handedness.slice(0, 2).every(hd => (hd?.[0]?.score ?? 0) >= BOX_HOLD_MIN_CONF);
+    twoHandConfirmFrames = bothConfident ? twoHandConfirmFrames + 1 : 0;
+    if (twoHandConfirmFrames >= TWO_HAND_CONFIRM_FRAMES) {
+      lastKnownTips = tips;
+      missingHandFrames = 0;
+    }
 
     const quad = buildQuad(tips);
     poly = smoothCorners(scalePolygon(quad, settings.frameScale));
@@ -2161,6 +2334,7 @@ function renderCamera(handRes) {
     tilt = Math.max(...zs) - Math.min(...zs);
     drawFrameEffect(poly);
   } else if (oneHand && lastKnownTips && missingHandFrames < HOLD_FRAMES) {
+    twoHandConfirmFrames = 0;
     // One hand dropped out, but we still have a recent fix on where the box
     // was. Keep the visible hand's side live (identified by which side of the
     // last-known box it's closer to) and hold the missing side in place.
@@ -2188,6 +2362,7 @@ function renderCamera(handRes) {
     lastKnownTips = null;
     missingHandFrames = 0;
     lastQuadAnchor = null;
+    twoHandConfirmFrames = 0;
   }
 
   if (settings.showSkeleton) {
@@ -2319,6 +2494,7 @@ function bindControls() {
   $('gesturesEnabled').addEventListener('change', e => {
     settings.gesturesEnabled = e.target.checked;
     pinchState = {};
+    wheelState = null;
   });
 
   $('resetBtn').addEventListener('click', () => {
