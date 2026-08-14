@@ -309,6 +309,17 @@
   .ob-mini-1 { animation: obBounce 1.6s ease-in-out infinite; }
   .ob-mini-2 { animation: obBounce 1.6s ease-in-out infinite; animation-delay:0.3s; }
   @keyframes obBounce { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
+
+  .ob-pinch-a { transform-origin:center; animation: obPinchInA 1.7s ease-in-out infinite; }
+  .ob-pinch-b { transform-origin:center; animation: obPinchInB 1.7s ease-in-out infinite; }
+  @keyframes obPinchInA { 0%,20%,100% { transform:translateX(0); } 55% { transform:translateX(8px); } }
+  @keyframes obPinchInB { 0%,20%,100% { transform:translateX(0); } 55% { transform:translateX(-8px); } }
+
+  .ob-wheel-spin { transform-origin:45px 38px; animation: obWheelSweep 2.6s ease-in-out infinite; }
+  @keyframes obWheelSweep { 0%,100% { transform:rotate(-55deg); } 50% { transform:rotate(55deg); } }
+
+  .ob-eye-group { transform-origin:10px 10px; animation: obBlink 2.6s ease-in-out infinite; }
+  @keyframes obBlink { 0%,38%,100% { transform:scaleY(1); } 46%,54% { transform:scaleY(0.06); } 62% { transform:scaleY(1); } }
 </style>
 </head>
 <body>
@@ -431,7 +442,7 @@
       <label><input type="checkbox" id="hapticsEnabled" checked> Haptic feedback (Android only)</label>
     </div>
     <p style="color:#7CFF9E; opacity:0.6; font-size:11.5px; margin:-6px 0 12px; line-height:1.4;">
-      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset &middot; pinch one hand while the other is open to point-and-pick with a wheel
+      Pinch one hand and hold to cycle effects &middot; pinch both hands together and hold to reset &middot; pinch one hand while the other is open to point-and-pick with a wheel, then blink (or pinch) to confirm
     </p>
     <button id="resetBtn">Reset to defaults</button>
 
@@ -536,13 +547,44 @@
             <div class="ob-mini-btn ob-mini-2">{ }</div>
           </div>
         </div>
+        <div class="ob-visual" id="obVisual6">
+          <svg viewBox="0 0 140 80" width="140" height="80">
+            <rect x="6" y="20" width="34" height="42" rx="10" fill="none" stroke="#46FF82" stroke-width="2" opacity="0.55"/>
+            <circle class="ob-pinch-a" cx="14" cy="30" r="4" fill="#EAFFF1"/>
+            <circle class="ob-pinch-b" cx="32" cy="30" r="4" fill="#EAFFF1"/>
+            <rect x="100" y="20" width="34" height="42" rx="10" fill="none" stroke="#FFD24A" stroke-width="2" opacity="0.55"/>
+            <circle cx="106" cy="30" r="4" fill="#FFD24A" opacity="0.85"/>
+            <circle cx="128" cy="30" r="4" fill="#FFD24A" opacity="0.85"/>
+            <text x="23" y="75" font-size="9" fill="#7CFF9E" text-anchor="middle">pinch &amp; hold</text>
+            <text x="117" y="75" font-size="9" fill="#FFD24A" text-anchor="middle">keep open</text>
+          </svg>
+        </div>
+        <div class="ob-visual" id="obVisual7">
+          <svg viewBox="0 0 140 88" width="140" height="88">
+            <circle cx="45" cy="38" r="28" fill="none" stroke="#46FF82" stroke-width="1.5" opacity="0.35"/>
+            <circle cx="45" cy="38" r="13" fill="none" stroke="#46FF82" stroke-width="1.5" opacity="0.35"/>
+            <g class="ob-wheel-spin">
+              <line x1="45" y1="38" x2="45" y2="12" stroke="#7CFF9E" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="45" cy="12" r="4" fill="#EAFFF1"/>
+            </g>
+            <circle cx="45" cy="38" r="3" fill="#EAFFF1"/>
+            <g transform="translate(98,28)">
+              <g class="ob-eye-group">
+                <ellipse cx="10" cy="10" rx="13" ry="8" fill="none" stroke="#FFD24A" stroke-width="2"/>
+                <circle cx="10" cy="10" r="4" fill="#FFD24A"/>
+              </g>
+            </g>
+            <text x="45" y="82" font-size="9" fill="#7CFF9E" text-anchor="middle">point to aim</text>
+            <text x="108" y="82" font-size="9" fill="#FFD24A" text-anchor="middle">blink to pick</text>
+          </svg>
+        </div>
       </div>
 
       <h3 id="onboardTitle"></h3>
       <p id="onboardDesc"></p>
 
       <div class="onboard-dots" id="onboardDots">
-        <span></span><span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
       </div>
 
       <div class="onboard-actions">
@@ -554,7 +596,7 @@
 </div>
 
 <script type="module">
-import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
 
 const video   = document.getElementById('video');
 const canvas  = document.getElementById('canvas');
@@ -627,6 +669,9 @@ const CHANGELOG = [
     'Gesture sounds and haptic feedback (haptics work on Android; iOS Safari doesn\u2019t support web vibration at all, so no feeling there, just sound)',
     'Wheel pointing needs far less physical movement now \u2014 no more twisting your whole wrist to reach a wedge',
     'The pause before the frame comes back after a gesture is now under half a second, down from nearly two',
+    'Wheel selections can now be confirmed by blinking and holding your eyes closed briefly \u2014 pinch still works too, as a backup',
+    'The wheel now shows a full list of its controls instead of one small hint line',
+    'Two new onboarding steps with animated hands showing how to open and use the wheel',
   ]},
 ];
 const CURRENT_VERSION = CHANGELOG[0].version;
@@ -654,6 +699,27 @@ const DEFAULTS = {
 const settings = { ...DEFAULTS };
 
 let handLandmarker;
+let visionFileset = null; // shared MediaPipe runtime, reused if face tracking is lazy-loaded later
+
+// --- face tracking (blink-to-select), lazy-loaded ---
+// Only loaded the first time the wheel is opened, and only ever runs WHILE
+// the wheel is open — normal hand-tracking/box mode never pays this cost.
+// Reuses the same @mediapipe/tasks-vision package already loaded for hands,
+// so this isn't a new dependency, just a second model file.
+let faceLandmarker = null;
+let faceLandmarkerLoading = false;
+let faceTrackingFailed = false;
+let latestFaceRes = null;
+const EYE_CLOSE_THRESHOLD = 0.6;  // blendshape score (0-1) counted as "eyes closed"
+const EYE_HOLD_MS = 450;          // how long eyes must stay closed to confirm — filters out normal reflexive blinks (~150ms)
+
+function getBlinkScore(faceRes) {
+  const shapes = faceRes?.faceBlendshapes?.[0]?.categories;
+  if (!shapes) return 0;
+  const left = shapes.find(c => c.categoryName === 'eyeBlinkLeft')?.score ?? 0;
+  const right = shapes.find(c => c.categoryName === 'eyeBlinkRight')?.score ?? 0;
+  return (left + right) / 2; // average of both eyes — more robust than either eye alone
+}
 let fxCanvas, fxCtx, maskLow, maskCtx;
 let smoothedCorners = null;
 let particles = [];
@@ -794,12 +860,11 @@ function hexToRgba(hex, a) {
 }
 
 async function init() {
-  let vision;
   try {
-    vision = await FilesetResolver.forVisionTasks(
+    visionFileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
     );
-    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    handLandmarker = await HandLandmarker.createFromOptions(visionFileset, {
       baseOptions: {
         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
       },
@@ -1572,17 +1637,45 @@ function showGestureToast(text) {
 
 function openWheel(triggerLabel, triggerHand) {
   const mid = { x: (toPx(triggerHand[4]).x + toPx(triggerHand[8]).x) / 2, y: (toPx(triggerHand[4]).y + toPx(triggerHand[8]).y) / 2 };
-  const pad = WHEEL_R_OUTER + 20;
+  const padX = WHEEL_R_OUTER + 20;
+  const padTop = WHEEL_R_OUTER + 20;
+  const padBottom = WHEEL_R_OUTER + 20 + 90; // extra room for the instruction card that renders below the wheel
   wheelState = {
     triggerLabel,
-    center: { x: Math.min(Math.max(mid.x, pad), canvas.width - pad), y: Math.min(Math.max(mid.y, pad), canvas.height - pad) },
+    center: { x: Math.min(Math.max(mid.x, padX), canvas.width - padX), y: Math.min(Math.max(mid.y, padTop), canvas.height - padBottom) },
     selectedIndex: -1,
     smoothedAngle: null,
     virtualAngle: null,   // amplified angle actually used for selection — see WHEEL_SENSITIVITY below
-    lastRawAngle: null    // previous frame's raw fingertip angle, for computing frame-to-frame deltas
+    lastRawAngle: null,   // previous frame's raw fingertip angle, for computing frame-to-frame deltas
+    eyesClosedSince: null // for blink-hold confirm
   };
   playWheelOpen();
   vibrate(12);
+  ensureFaceLandmarker(); // fire-and-forget — pinch-to-confirm still works immediately even before this finishes loading
+}
+
+// Lazy-loaded, same pattern as ensureThree() for the 3D viewport: only pulled
+// in when actually needed, cached after first load. If it fails for any
+// reason (network, unsupported browser), the wheel still works fine via
+// pinch-to-confirm — blink is additive, never a hard requirement.
+async function ensureFaceLandmarker() {
+  if (faceLandmarker || faceLandmarkerLoading || faceTrackingFailed || !visionFileset) return;
+  faceLandmarkerLoading = true;
+  try {
+    faceLandmarker = await FaceLandmarker.createFromOptions(visionFileset, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+      },
+      outputFaceBlendshapes: true,
+      runningMode: "VIDEO",
+      numFaces: 1
+    });
+  } catch (err) {
+    console.warn('Face tracking unavailable, blink-to-confirm disabled — pinch still works:', err);
+    faceTrackingFailed = true;
+  } finally {
+    faceLandmarkerLoading = false;
+  }
 }
 
 function angleToWedge(ang, n, baseAngle) {
@@ -1644,11 +1737,45 @@ function drawWheel() {
   ctx.fillStyle = '#EAFFF1';
   ctx.fill();
 
-  ctx.font = '500 11px -apple-system, system-ui, sans-serif';
-  ctx.fillStyle = 'rgba(234,255,241,0.65)';
-  ctx.textAlign = 'center';
-  ctx.fillText('pinch to pick \u00B7 let go to cancel', center.x, center.y + WHEEL_R_OUTER + 34);
+  // Full control legend, not just a one-line hint — shown every time the
+  // wheel is open so it's never a mystery what your hands (and eyes) do here.
+  const lines = [
+    'Point with your other hand to aim',
+    'Blink and hold, or pinch, to pick',
+    'Let go of the pinch to cancel'
+  ];
+  const lineH = 18;
+  const cardW = 250;
+  const cardH = lines.length * lineH + 18;
+  const cardX = center.x - cardW / 2;
+  const cardY = center.y + WHEEL_R_OUTER + 18;
 
+  ctx.fillStyle = 'rgba(9,13,11,0.85)';
+  roundRectPath(ctx, cardX, cardY, cardW, cardH, 10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(124,255,158,0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  ctx.fillStyle = '#CDEFD9';
+  ctx.textAlign = 'center';
+  lines.forEach((line, i) => {
+    ctx.fillText(line, center.x, cardY + 15 + i * lineH);
+  });
+
+  ctx.restore();
+}
+
+function drawBlinkProgress(progress) {
+  const { center } = wheelState;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, 22, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -1696,9 +1823,34 @@ function updateWheel(present, now) {
     }
   }
 
+  // Blink-hold, the primary way to confirm — keeps the pointing hand
+  // perfectly steady since there's no pinch motion to jostle your aim right
+  // as you're picking. Held closed briefly (450ms) rather than any blink, so
+  // an ordinary reflexive blink (~150ms) can't accidentally confirm.
+  const blinkScore = getBlinkScore(latestFaceRes);
+  const eyesClosed = blinkScore >= EYE_CLOSE_THRESHOLD;
+  if (eyesClosed) {
+    if (wheelState.eyesClosedSince === null) wheelState.eyesClosedSince = now;
+  } else {
+    wheelState.eyesClosedSince = null;
+  }
+  const blinkHeldMs = wheelState.eyesClosedSince !== null ? now - wheelState.eyesClosedSince : 0;
+  const blinkReady = blinkHeldMs >= EYE_HOLD_MS;
+
   drawWheel(); // draw first so a confirming frame still shows the highlighted wedge before closing
 
-  if (ptr && ptr.pinched && wheelState.selectedIndex >= 0) {
+  if (wheelState.eyesClosedSince !== null && !blinkReady) {
+    drawBlinkProgress(Math.min(1, blinkHeldMs / EYE_HOLD_MS));
+  }
+
+  // Pinch is kept as a fallback confirm path — face tracking can fail to load,
+  // a face can be out of frame, lighting can throw off blink detection, and
+  // not everyone finds a deliberate blink-hold comfortable. Whichever happens
+  // first wins.
+  const pinchConfirm = ptr && ptr.pinched && wheelState.selectedIndex >= 0;
+  const blinkConfirm = blinkReady && wheelState.selectedIndex >= 0;
+
+  if (pinchConfirm || blinkConfirm) {
     playWheelConfirm();
     vibrate([16, 24, 34]);
     applyEffectByIndex(wheelState.selectedIndex);
@@ -1827,6 +1979,16 @@ function loop(ts) {
     const t0 = performance.now();
     const handRes = handLandmarker.detectForVideo(video, ts);
     detectMs = detectMs * 0.9 + (performance.now() - t0) * 0.1;
+
+    // Face tracking only runs while the wheel is actually open — costs nothing
+    // during normal box-tracking use.
+    if (wheelState && faceLandmarker) {
+      try { latestFaceRes = faceLandmarker.detectForVideo(video, ts); }
+      catch (e) { /* transient — just skip this frame's blink reading */ }
+    } else if (!wheelState) {
+      latestFaceRes = null; // don't let a stale reading leak into a future wheel session
+    }
+
     if (settings.viewMode === '3d' && threeReady) render3D(handRes);
     else renderCamera(handRes);
   }
@@ -2417,7 +2579,7 @@ function renderCamera(handRes) {
       hands.forEach((h, i) => drawHand(h.map(toPx), skeletonColorFor(i), false));
     }
     drawWatermark();
-    hud.textContent = 'Point to an effect \u00B7 pinch to pick';
+    hud.textContent = 'Point to aim \u00B7 blink or pinch to pick';
     updateDataPanel(hands, handedness, null, 0);
     return;
   }
@@ -2676,7 +2838,9 @@ const ONBOARD_STEPS = [
   { title: 'Live hand tracking', desc: 'Every joint on both hands is tracked in real time, right over the camera.', visual: 2 },
   { title: 'Style & raw data', desc: 'Style changes the colors and effects. Data shows the raw tracking numbers.', visual: 5 },
   { title: 'Hit record', desc: 'Tap the shutter to capture your moves, with a live timer.', visual: 3 },
-  { title: '3D data view', desc: 'Tap the cube to see the raw hands and box floating in real 3D space.', visual: 4 }
+  { title: '3D data view', desc: 'Tap the cube to see the raw hands and box floating in real 3D space.', visual: 4 },
+  { title: 'Open the wheel', desc: 'Pinch and hold one hand while keeping the other open to bring up a radial menu.', visual: 6 },
+  { title: 'Point and pick', desc: 'Aim with your open hand to highlight an effect, then blink and hold (or pinch) to pick it.', visual: 7 }
 ];
 
 let obIndex = 0;
