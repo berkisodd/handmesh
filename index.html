@@ -392,6 +392,9 @@
         <option value="scan">Scanline</option>
         <option value="bouncy">Bouncy</option>
         <option value="pro">Professional</option>
+        <option value="portal">Portal</option>
+        <option value="tracking">Tracking data</option>
+        <option value="slice">Slice shift</option>
         <option value="outline">Outline only</option>
       </select>
     </div>
@@ -671,8 +674,15 @@ const CHANGELOG = [
     'The pause before the frame comes back after a gesture is now under half a second, down from nearly two',
     'Wheel selections are now confirmed by blinking and holding your eyes closed briefly \u2014 no pinching involved',
     'A clear notification now pops up the moment the wheel opens, since the frame disappearing at the same time was easy to miss',
+    'Three new effects: Portal (stark black and white with an orange sweep and chromatic streaks), Tracking data (dashed readout boxes, perspective lines, RGB glitch columns), and Slice shift (the framed area slides out of place with a glowing seam)',
+    'Fixed the wheel opening on the opposite side of the screen from your hand, and aiming being reversed left-to-right',
+    'Fixed the wheel, its instructions, the watermark and all on-screen labels rendering at half size on phones',
+    'Fixed the Professional effect drawing its size readout backwards',
     'The wheel now shows a full list of its controls instead of one small hint line',
     'Two new onboarding steps with animated hands showing how to open and use the wheel',
+    'Fixed the box never returning if you switched to 3D view mid-gesture',
+    'Fixed a wheel pick being confirmable with your eyes open if your face left frame mid-blink',
+    'Fixed recordings piling up in memory \u2014 each clip\u2019s data is now released when the next one finishes',
   ]},
 ];
 const CURRENT_VERSION = CHANGELOG[0].version;
@@ -711,10 +721,16 @@ let faceLandmarker = null;
 let faceLandmarkerLoading = false;
 let faceTrackingFailed = false;
 let latestFaceRes = null;
+let latestFaceResAt = 0;
+const FACE_RES_MAX_AGE_MS = 300; // a reading older than this is a frozen frame, not a live blink
 const EYE_CLOSE_THRESHOLD = 0.6;  // blendshape score (0-1) counted as "eyes closed"
 const EYE_HOLD_MS = 450;          // how long eyes must stay closed to confirm — filters out normal reflexive blinks (~150ms)
 
 function getBlinkScore(faceRes) {
+  // A stale result means detection stopped mid-blink (face left frame, or a
+  // transient detect error) — treating it as still-closed could confirm a
+  // selection with your eyes open. No fresh reading = no blink.
+  if (performance.now() - latestFaceResAt > FACE_RES_MAX_AGE_MS) return 0;
   const shapes = faceRes?.faceBlendshapes?.[0]?.categories;
   if (!shapes) return 0;
   const left = shapes.find(c => c.categoryName === 'eyeBlinkLeft')?.score ?? 0;
@@ -765,6 +781,7 @@ let recordMimeType = null;
 let cameraStream = null;
 let hasAudio = false;
 let stopReason = 'manual';
+let lastRecordingUrl = null;
 const MAX_RECORD_MS = 60000;
 
 const MIME_CANDIDATES = [
@@ -799,6 +816,11 @@ let smoothedTwist = null;
 let videoAspect = 16 / 9;
 let coverTransform = { offsetX: 0, offsetY: 0, srcW: 0, srcH: 0 };
 let resizeTimer = null;
+// Canvas-drawn UI (wheel, rings, labels, watermark) is sized in canvas pixels,
+// but the backing store is devicePixelRatio-scaled — so without this, a 12px
+// font renders at 6 physical px on a retina phone. Multiply UI dimensions by
+// this to keep their apparent size consistent across displays.
+let uiScale = 1;
 
 // --- error codes ---
 // Central registry so failures show a short stable code (findable in Settings)
@@ -974,6 +996,7 @@ function resizeCanvasToDisplay() {
 
   canvas.width = w;
   canvas.height = h;
+  uiScale = Math.max(1, w / Math.max(1, stageEl.clientWidth));
   updateCoverTransform();
 
   if (fxCanvas) {
@@ -1026,7 +1049,12 @@ function setupRecording() {
   mediaRecorder.onstop = () => {
     const baseType = recordMimeType.split(';')[0];
     const blob = new Blob(recordingChunks, { type: baseType });
+    // Revoke the previous clip's URL — otherwise every recording's full blob
+    // (tens of MB) stays pinned in memory for the page's lifetime. Only the
+    // newest clip is downloadable anyway, since both links get overwritten.
+    if (lastRecordingUrl) { try { URL.revokeObjectURL(lastRecordingUrl); } catch (e) {} }
     const url = URL.createObjectURL(blob);
+    lastRecordingUrl = url;
     const ext = baseType.includes('mp4') ? 'mp4' : 'webm';
     const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
     const filename = `hand-frame-${timestamp}.${ext}`;
@@ -1353,15 +1381,16 @@ function drawWatermark() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.textBaseline = 'top';
 
-  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  const S = uiScale;
+  ctx.font = `600 ${Math.round(12 * S)}px -apple-system, system-ui, sans-serif`;
   const w1 = ctx.measureText(line1).width;
-  ctx.font = '400 12px -apple-system, system-ui, sans-serif';
+  ctx.font = `400 ${Math.round(12 * S)}px -apple-system, system-ui, sans-serif`;
   const w2 = ctx.measureText(line2).width;
 
-  const pad = 10;
+  const pad = 10 * S;
   const boxW = Math.max(w1, w2) + pad * 2;
-  const boxH = 40;
-  const inset = 14;
+  const boxH = 40 * S;
+  const inset = 14 * S;
 
   const elapsed = performance.now() - recordingStartTime;
   const slot = Math.floor(elapsed / WM_SLOT_MS);
@@ -1374,7 +1403,7 @@ function drawWatermark() {
     t = easeInOutCubic((into - (WM_SLOT_MS - WM_TRANS_MS)) / WM_TRANS_MS);
   }
   const x = posA.x + (posB.x - posA.x) * t;
-  const y = posA.y + (posB.y - posA.y) * t + Math.sin(elapsed / 450) * 2; // subtle idle bob
+  const y = posA.y + (posB.y - posA.y) * t + Math.sin(elapsed / 450) * 2 * S; // subtle idle bob
 
   // brief landing pop right after arriving at a new corner
   let scale = 1;
@@ -1388,16 +1417,16 @@ function drawWatermark() {
   ctx.translate(-cx, -cy);
 
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  roundRectPath(ctx, x, y, boxW, boxH, 8);
+  roundRectPath(ctx, x, y, boxW, boxH, 8 * S);
   ctx.fill();
 
   ctx.fillStyle = '#7CFF9E';
-  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
-  ctx.fillText(line1, x + pad, y + 7);
+  ctx.font = `600 ${Math.round(12 * S)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText(line1, x + pad, y + 7 * S);
 
   ctx.fillStyle = 'rgba(234,255,241,0.85)';
-  ctx.font = '400 12px -apple-system, system-ui, sans-serif';
-  ctx.fillText(line2, x + pad, y + 22);
+  ctx.font = `400 ${Math.round(12 * S)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText(line2, x + pad, y + 22 * S);
 
   ctx.restore();
 }
@@ -1541,8 +1570,8 @@ const PINCH_RATIO = 0.32;
 const GESTURE_HOLD_MS = 700;
 const DOUBLE_GRACE_MS = 260;  // window after one hand qualifies, to see if the other joins for a double or a wheel
 const GESTURE_COOLDOWN_MS = 550;
-const EFFECT_CYCLE  = ['invert', 'solid',  'cycle', 'glow',  'particles', 'scan', 'bouncy', 'pro', 'outline'];
-const EFFECT_LABELS = ['Invert', 'Solid',  'Cycle', 'Glow',  'Particles', 'Scan', 'Bouncy', 'Pro', 'Outline']; // kept in lockstep with EFFECT_CYCLE, same order
+const EFFECT_CYCLE  = ['invert', 'solid',  'cycle', 'glow',  'particles', 'scan', 'bouncy', 'pro', 'portal', 'tracking', 'slice', 'outline'];
+const EFFECT_LABELS = ['Invert', 'Solid',  'Cycle', 'Glow',  'Particles', 'Scan', 'Bouncy', 'Pro', 'Portal', 'Track',    'Slice', 'Outline']; // kept in lockstep with EFFECT_CYCLE, same order
 const WHEEL_R_OUTER = 148, WHEEL_R_INNER = 46, WHEEL_DEADZONE = 22;
 const WHEEL_SENSITIVITY = 4.5; // amplifies physical wrist rotation into wheel movement — tune up/down to taste
 
@@ -1640,13 +1669,24 @@ function showGestureToast(text, durationMs) {
 }
 
 function openWheel(triggerLabel, triggerHand) {
-  const mid = { x: (toPx(triggerHand[4]).x + toPx(triggerHand[8]).x) / 2, y: (toPx(triggerHand[4]).y + toPx(triggerHand[8]).y) / 2 };
-  const padX = WHEEL_R_OUTER + 20;
-  const padTop = WHEEL_R_OUTER + 20;
-  const padBottom = WHEEL_R_OUTER + 20 + 90; // extra room for the instruction card that renders below the wheel
+  // Screen space, not landmark space. drawWheel renders under an identity
+  // transform, so an unmirrored centre would put the wheel on the opposite
+  // side of the screen from the hand that opened it whenever mirroring is on.
+  const a = toScreen(toPx(triggerHand[4])), b = toScreen(toPx(triggerHand[8]));
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const padX = (WHEEL_R_OUTER + 20) * uiScale;
+  const padTop = (WHEEL_R_OUTER + 20) * uiScale;
+  const padBottom = (WHEEL_R_OUTER + 20 + 90) * uiScale; // extra room for the instruction card that renders below the wheel
+  // Guard the clamp: on a short screen the two pads can overlap, which would
+  // otherwise invert the min/max and throw the wheel off-screen.
+  const loY = Math.min(padTop, canvas.height / 2);
+  const hiY = Math.max(loY, canvas.height - padBottom);
   wheelState = {
     triggerLabel,
-    center: { x: Math.min(Math.max(mid.x, padX), canvas.width - padX), y: Math.min(Math.max(mid.y, padTop), canvas.height - padBottom) },
+    center: {
+      x: Math.min(Math.max(mid.x, Math.min(padX, canvas.width / 2)), Math.max(padX, canvas.width - padX)),
+      y: Math.min(Math.max(mid.y, loY), hiY)
+    },
     selectedIndex: -1,
     smoothedAngle: null,
     virtualAngle: null,   // amplified angle actually used for selection — see WHEEL_SENSITIVITY below
@@ -1698,34 +1738,38 @@ function drawWheel() {
   const n = EFFECT_CYCLE.length;
   const segAngle = (Math.PI * 2) / n;
   const baseAngle = -Math.PI / 2; // wedge 0 centered at 12 o'clock
+  const S = uiScale;
+  const rOuterBase = WHEEL_R_OUTER * S, rInner = WHEEL_R_INNER * S;
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   ctx.beginPath();
-  ctx.arc(center.x, center.y, WHEEL_R_OUTER + 16, 0, Math.PI * 2);
+  ctx.arc(center.x, center.y, rOuterBase + 16 * S, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(5,8,10,0.74)';
   ctx.fill();
 
   for (let i = 0; i < n; i++) {
     const mid = baseAngle + i * segAngle;
     const isSel = i === selectedIndex;
-    const rOut = isSel ? WHEEL_R_OUTER + 8 : WHEEL_R_OUTER;
+    const rOut = isSel ? rOuterBase + 8 * S : rOuterBase;
     const gap = 0.025;
 
     ctx.beginPath();
     ctx.arc(center.x, center.y, rOut, mid - segAngle / 2 + gap, mid + segAngle / 2 - gap);
-    ctx.arc(center.x, center.y, WHEEL_R_INNER, mid + segAngle / 2 - gap, mid - segAngle / 2 + gap, true);
+    ctx.arc(center.x, center.y, rInner, mid + segAngle / 2 - gap, mid - segAngle / 2 + gap, true);
     ctx.closePath();
     ctx.fillStyle = isSel ? hexToRgba(settings.frameColor, 0.88) : 'rgba(255,255,255,0.07)';
     ctx.fill();
     ctx.strokeStyle = hexToRgba(settings.frameColor, isSel ? 1 : 0.28);
-    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.lineWidth = (isSel ? 2 : 1) * S;
     ctx.stroke();
 
-    const labelR = (WHEEL_R_INNER + rOut) / 2;
+    const labelR = (rInner + rOut) / 2;
     ctx.fillStyle = isSel ? '#06210F' : '#CDEFD9';
-    ctx.font = isSel ? '700 12px -apple-system, system-ui, sans-serif' : '600 11px -apple-system, system-ui, sans-serif';
+    ctx.font = isSel
+      ? `700 ${Math.round(11 * S)}px -apple-system, system-ui, sans-serif`
+      : `600 ${Math.round(10 * S)}px -apple-system, system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(EFFECT_LABELS[i], center.x + Math.cos(mid) * labelR, center.y + Math.sin(mid) * labelR);
@@ -1734,13 +1778,13 @@ function drawWheel() {
   if (smoothedAngle !== null) {
     ctx.beginPath();
     ctx.moveTo(center.x, center.y);
-    ctx.lineTo(center.x + Math.cos(smoothedAngle) * WHEEL_R_INNER, center.y + Math.sin(smoothedAngle) * WHEEL_R_INNER);
+    ctx.lineTo(center.x + Math.cos(smoothedAngle) * rInner, center.y + Math.sin(smoothedAngle) * rInner);
     ctx.strokeStyle = hexToRgba(settings.frameColor, 0.6);
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * S;
     ctx.stroke();
   }
   ctx.beginPath();
-  ctx.arc(center.x, center.y, 5, 0, Math.PI * 2);
+  ctx.arc(center.x, center.y, 5 * S, 0, Math.PI * 2);
   ctx.fillStyle = '#EAFFF1';
   ctx.fill();
 
@@ -1751,24 +1795,24 @@ function drawWheel() {
     'Blink and hold to pick',
     'Let go of the pinch to cancel'
   ];
-  const lineH = 18;
-  const cardW = 250;
-  const cardH = lines.length * lineH + 18;
+  const lineH = 18 * S;
+  const cardW = 250 * S;
+  const cardH = lines.length * lineH + 18 * S;
   const cardX = center.x - cardW / 2;
-  const cardY = center.y + WHEEL_R_OUTER + 18;
+  const cardY = center.y + rOuterBase + 18 * S;
 
   ctx.fillStyle = 'rgba(9,13,11,0.85)';
-  roundRectPath(ctx, cardX, cardY, cardW, cardH, 10);
+  roundRectPath(ctx, cardX, cardY, cardW, cardH, 10 * S);
   ctx.fill();
   ctx.strokeStyle = 'rgba(124,255,158,0.25)';
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1 * S;
   ctx.stroke();
 
-  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  ctx.font = `600 ${Math.round(12 * S)}px -apple-system, system-ui, sans-serif`;
   ctx.fillStyle = '#CDEFD9';
   ctx.textAlign = 'center';
   lines.forEach((line, i) => {
-    ctx.fillText(line, center.x, cardY + 15 + i * lineH);
+    ctx.fillText(line, center.x, cardY + 15 * S + i * lineH);
   });
 
   ctx.restore();
@@ -1779,9 +1823,9 @@ function drawBlinkProgress(progress) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 4 * uiScale;
   ctx.beginPath();
-  ctx.arc(center.x, center.y, 22, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+  ctx.arc(center.x, center.y, 22 * uiScale, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
@@ -1792,9 +1836,9 @@ function updateWheel(present, now) {
   const ptr = pointerLabel ? present[pointerLabel] : null;
 
   if (ptr) {
-    const tip = toPx(ptr.hand[8]); // index fingertip is the pointer
+    const tip = toScreen(toPx(ptr.hand[8])); // index fingertip is the pointer, in the same screen space as the wheel centre
     const dx = tip.x - wheelState.center.x, dy = tip.y - wheelState.center.y;
-    if (Math.hypot(dx, dy) > WHEEL_DEADZONE) {
+    if (Math.hypot(dx, dy) > WHEEL_DEADZONE * uiScale) {
       const ang = Math.atan2(dy, dx);
 
       // Relative motion, amplified — not absolute position. Pointing straight at
@@ -1907,9 +1951,9 @@ function updateGesturesInner(hands, handedness) {
       const mid = { x: (toPx(hand[4]).x + toPx(hand[8]).x) / 2, y: (toPx(hand[4]).y + toPx(hand[8]).y) / 2 };
       ctx.save();
       ctx.strokeStyle = hexToRgba(settings.frameColor, 0.9);
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 3 * uiScale;
       ctx.beginPath();
-      ctx.arc(mid.x, mid.y, 16, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+      ctx.arc(mid.x, mid.y, 16 * uiScale, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -1988,7 +2032,10 @@ function loop(ts) {
     // Face tracking only runs while the wheel is actually open — costs nothing
     // during normal box-tracking use.
     if (wheelState && faceLandmarker) {
-      try { latestFaceRes = faceLandmarker.detectForVideo(video, ts); }
+      try {
+        latestFaceRes = faceLandmarker.detectForVideo(video, ts);
+        latestFaceResAt = performance.now();
+      }
       catch (e) { /* transient — just skip this frame's blink reading */ }
     } else if (!wheelState) {
       latestFaceRes = null; // don't let a stale reading leak into a future wheel session
@@ -2446,9 +2493,9 @@ function drawProfessionalEffect(poly) {
   ctx.restore();
 
   // corner tick marks, like technical/CAD viewport annotations
-  const tick = 14;
+  const tick = 14 * uiScale;
   ctx.strokeStyle = c;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2 * uiScale;
   ctx.beginPath();
   ctx.moveTo(left, top + tick); ctx.lineTo(left, top); ctx.lineTo(left + tick, top);
   ctx.moveTo(right - tick, top); ctx.lineTo(right, top); ctx.lineTo(right, top + tick);
@@ -2456,12 +2503,228 @@ function drawProfessionalEffect(poly) {
   ctx.moveTo(left + tick, bottom); ctx.lineTo(left, bottom); ctx.lineTo(left, bottom - tick);
   ctx.stroke();
 
-  // live dimension readout — steady text, no motion, reinforces the restrained feel
+  // Live dimension readout. Must be drawn in screen space: everything above is
+  // geometry that mirrors harmlessly, but text under the mirror transform
+  // comes out backwards.
   const w = Math.round(right - left), h = Math.round(bottom - top);
-  ctx.font = '600 11px ui-monospace, monospace';
+  const labelAnchor = toScreen({ x: left, y: top });
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = `600 ${Math.round(11 * uiScale)}px ui-monospace, monospace`;
   ctx.fillStyle = c;
+  ctx.textAlign = settings.mirror ? 'right' : 'left';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`${w}\u00D7${h}`, left, top - 6);
+  ctx.fillText(`${w}\u00D7${h}`, labelAnchor.x, labelAnchor.y - 6 * uiScale);
+  ctx.restore();
+}
+
+// Effects that re-sample already-drawn canvas pixels, or render text, must
+// work in true screen space. The mirror transform is still active during
+// drawFrameEffect (that's what aligns the box to the flipped video), so
+// sampling with poly coords directly would read from the wrong side of the
+// frame, and any text would come out backwards.
+function toScreen(p) {
+  return { x: settings.mirror ? canvas.width - p.x : p.x, y: p.y, z: p.z, depth: p.depth };
+}
+
+// Reference look: stark black-and-white artwork inside the frame, an orange
+// accent band, and diagonal chromatic-aberration streaks cutting across.
+function drawPortalEffect(poly) {
+  buildLowResMask(poly);
+  const t = performance.now();
+
+  fxCtx.save();
+  fxCtx.setTransform(1, 0, 0, 1, 0, 0);
+  fxCtx.globalCompositeOperation = 'source-over';
+  fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+
+  // Crush to near-pure black and white — this is what sells the "different
+  // world inside the frame" look rather than just a tinted camera feed.
+  fxCtx.filter = 'grayscale(1) contrast(2.6) brightness(1.12)';
+  fxCtx.drawImage(
+    video,
+    coverTransform.offsetX, coverTransform.offsetY, coverTransform.srcW, coverTransform.srcH,
+    0, 0, fxCanvas.width, fxCanvas.height
+  );
+  fxCtx.filter = 'none';
+
+  // Orange accent band, sweeping slowly across the frame.
+  const bandPhase = (t / 4200) % 1;
+  const bandY = fxCanvas.height * (bandPhase * 1.6 - 0.3);
+  fxCtx.globalCompositeOperation = 'multiply';
+  const bandGrad = fxCtx.createLinearGradient(0, bandY, fxCanvas.width * 0.6, bandY + fxCanvas.height * 0.5);
+  bandGrad.addColorStop(0, 'rgba(255,255,255,1)');
+  bandGrad.addColorStop(0.42, '#F07A22');
+  bandGrad.addColorStop(0.72, '#F07A22');
+  bandGrad.addColorStop(1, 'rgba(255,255,255,1)');
+  fxCtx.fillStyle = bandGrad;
+  fxCtx.fillRect(0, 0, fxCanvas.width, fxCanvas.height);
+
+  // Diagonal RGB-split streaks.
+  fxCtx.globalCompositeOperation = 'screen';
+  const streakColors = ['#3A6BFF', '#B14BFF', '#28E0FF'];
+  for (let i = 0; i < 7; i++) {
+    const off = ((t / 26) + i * 130) % (fxCanvas.height + fxCanvas.width);
+    fxCtx.strokeStyle = streakColors[i % streakColors.length];
+    fxCtx.globalAlpha = 0.55;
+    fxCtx.lineWidth = i % 3 === 0 ? 3 : 1.5;
+    fxCtx.beginPath();
+    fxCtx.moveTo(-fxCanvas.width * 0.1, off);
+    fxCtx.lineTo(fxCanvas.width * 1.1, off - fxCanvas.width * 0.42);
+    fxCtx.stroke();
+  }
+  fxCtx.globalAlpha = 1;
+
+  fxCtx.globalCompositeOperation = 'destination-in';
+  fxCtx.imageSmoothingEnabled = false;
+  fxCtx.drawImage(maskLow, 0, 0, fxCanvas.width, fxCanvas.height);
+  fxCtx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = settings.opacity;
+  ctx.drawImage(fxCanvas, 0, 0);
+  ctx.restore();
+
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.85);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+// Deterministic placements so the boxes sit still instead of reshuffling every
+// frame. Labels are sevenths, matching the readout style in the reference.
+const TRACK_BOXES = [
+  { fx: 0.06, fy: 0.08, fw: 0.22, fh: 0.20, label: '0.1429' },
+  { fx: 0.38, fy: 0.05, fw: 0.18, fh: 0.15, label: '0.2857' },
+  { fx: 0.68, fy: 0.14, fw: 0.24, fh: 0.22, label: '0.4286' },
+  { fx: 0.12, fy: 0.52, fw: 0.20, fh: 0.24, label: '1.0000' },
+  { fx: 0.46, fy: 0.62, fw: 0.26, fh: 0.20, label: '1.2857' },
+  { fx: 0.74, fy: 0.55, fw: 0.18, fh: 0.26, label: '1.4286' },
+];
+
+// Reference look: dashed tracking boxes with numeric readouts, white
+// perspective lines converging on a vanishing point, vertical RGB glitch
+// columns. Drawn in screen space so the labels read correctly.
+function drawTrackingEffect(poly) {
+  const sPoly = poly.map(toScreen);
+  const xs = sPoly.map(p => p.x), ys = sPoly.map(p => p.y);
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const w = right - left, h = bottom - top;
+  const t = performance.now();
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  tracePath(ctx, sPoly);
+  ctx.clip();
+
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fillRect(left, top, w, h);
+
+  // Vertical RGB glitch columns.
+  const cols = 46;
+  for (let i = 0; i < cols; i++) {
+    const phase = Math.sin(i * 1.7 + t / 260);
+    if (phase < 0.25) continue;
+    const cx = left + (i / cols) * w;
+    const colH = h * (0.25 + 0.6 * Math.abs(Math.sin(i * 3.1 + t / 340)));
+    const cy = top + (h - colH) * (0.5 + 0.4 * Math.sin(i * 2.3));
+    ctx.fillStyle = ['rgba(255,60,60,0.45)', 'rgba(60,255,120,0.45)', 'rgba(70,120,255,0.45)'][i % 3];
+    ctx.fillRect(cx, cy, Math.max(1, w / cols * 0.4), colH);
+  }
+
+  // Perspective lines converging on a vanishing point that drifts slowly.
+  const vpx = left + w * (0.72 + 0.06 * Math.sin(t / 2600));
+  const vpy = top + h * (0.42 + 0.05 * Math.cos(t / 3100));
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const corner of [[left, top], [right, top], [right, bottom], [left, bottom],
+                        [left, top + h / 2], [right, top + h / 2]]) {
+    ctx.moveTo(corner[0], corner[1]);
+    ctx.lineTo(vpx, vpy);
+  }
+  ctx.stroke();
+
+  // Dashed tracking boxes with readouts.
+  ctx.font = `500 ${Math.round(9 * uiScale)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.setLineDash([4 * uiScale, 4 * uiScale]);
+  ctx.lineWidth = 1 * uiScale;
+  for (const b of TRACK_BOXES) {
+    const bx = left + b.fx * w, by = top + b.fy * h;
+    const bw = b.fw * w, bh = b.fh * h;
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(b.label, bx + 3 * uiScale, by + 3 * uiScale);
+  }
+  ctx.setLineDash([]);
+
+  // Crosshair on the vanishing point.
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.moveTo(vpx - 7 * uiScale, vpy); ctx.lineTo(vpx + 7 * uiScale, vpy);
+  ctx.moveTo(vpx, vpy - 7 * uiScale); ctx.lineTo(vpx, vpy + 7 * uiScale);
+  ctx.stroke();
+
+  ctx.restore();
+
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.7);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+// Reference look: the framed region is displaced sideways from reality, with a
+// red-tinted offset copy and a bright seam along the cut. Re-samples the
+// already-drawn canvas, so it runs entirely in screen space.
+function drawSliceEffect(poly) {
+  const sPoly = poly.map(toScreen);
+  const xs = sPoly.map(p => p.x), ys = sPoly.map(p => p.y);
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const w = right - left, h = bottom - top;
+  if (w < 4 || h < 4) return;
+
+  const t = performance.now();
+  const shift = w * 0.30 * Math.sin(t / 1500); // displacement scales with box size, so it reads the same near or far
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  tracePath(ctx, sPoly);
+  ctx.clip();
+
+  // Pull the framed region from the canvas and redraw it offset. Reading and
+  // writing the same canvas is fine — the source is snapshotted first.
+  const sx = Math.max(0, Math.min(canvas.width - 1, left - shift));
+  const sw = Math.max(1, Math.min(canvas.width - sx, w));
+  ctx.drawImage(canvas, sx, top, sw, h, left, top, w, h);
+
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.fillStyle = 'rgba(255,70,60,0.55)';
+  ctx.fillRect(left, top, w, h);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.restore();
+
+  // Bright seams along the top and bottom of the displaced slab.
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.strokeStyle = '#FFD400';
+  ctx.lineWidth = 3;
+  ctx.shadowColor = '#FFD400';
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  ctx.moveTo(left, top); ctx.lineTo(right, top);
+  ctx.moveTo(left, bottom); ctx.lineTo(right, bottom);
+  ctx.stroke();
+  ctx.restore();
+
+  tracePath(ctx, poly);
+  ctx.strokeStyle = hexToRgba(settings.frameColor, 0.6);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 }
 
 function drawFrameEffect(poly) {
@@ -2470,6 +2733,9 @@ function drawFrameEffect(poly) {
   if (settings.effectStyle === 'scan') { drawScanEffect(poly); return; }
   if (settings.effectStyle === 'bouncy') { drawBouncyEffect(poly); return; }
   if (settings.effectStyle === 'pro') { drawProfessionalEffect(poly); return; }
+  if (settings.effectStyle === 'portal') { drawPortalEffect(poly); return; }
+  if (settings.effectStyle === 'tracking') { drawTrackingEffect(poly); return; }
+  if (settings.effectStyle === 'slice') { drawSliceEffect(poly); return; }
 
   const tint = hexToRgba(settings.frameColor, settings.opacity);
 
@@ -2693,7 +2959,7 @@ function bindControls() {
     $('errorCodesToggle').textContent = open ? 'Error codes ▴' : 'Error codes ▾';
   });
 
-  const PIXELATED_STYLES = ['invert', 'solid', 'cycle', 'glow', 'scan'];
+  const PIXELATED_STYLES = ['invert', 'solid', 'cycle', 'glow', 'scan', 'portal'];
   const BLEND_STYLES = ['invert', 'cycle'];
 
   const syncControlAvailability = () => {
@@ -2723,6 +2989,13 @@ function bindControls() {
   };
 
   viewModeBtn.addEventListener('click', async () => {
+    // Gesture bookkeeping only runs in camera mode, so switching views
+    // mid-pinch would strand boxReturnAt at Infinity — a permanent soft-lock
+    // where the box never returns. Clear all gesture state on every switch.
+    pinchState = {};
+    wheelState = null;
+    boxReturnAt = 0;
+    wasGestureActive = false;
     if (settings.viewMode === 'camera') {
       if (!threeReady) {
         viewModeBtn.disabled = true;
@@ -2792,6 +3065,8 @@ function bindControls() {
     settings.gesturesEnabled = e.target.checked;
     pinchState = {};
     wheelState = null;
+    boxReturnAt = 0;
+    wasGestureActive = false;
   });
   $('soundEnabled').addEventListener('change', e => { settings.soundEnabled = e.target.checked; });
   $('hapticsEnabled').addEventListener('change', e => { settings.hapticsEnabled = e.target.checked; });
