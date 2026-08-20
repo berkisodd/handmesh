@@ -645,47 +645,42 @@ const LANDMARK_NAMES = [
 // it's just "has the user seen up to this point." season is a human label
 // shown as a section header when several updates land around the same time.
 const CHANGELOG = [
-  { version: 1, season: 'Summer 2026', date: '2026-08-13', items: [
-    'Recording now includes microphone audio, with a toggle to mute it',
-    '60 second recording limit, with a warning in the final 5 seconds',
-    'Three new effects: Glow pulse, Particles, Scanline',
-    'Bouncy effect — real spring physics on the box, with squash and stretch',
-    'Professional effect — clean technical/CAD-style frame with corner ticks and live dimensions',
-    '3D twist now tracks your hands\u2019 real rotation and actually tangles the box',
-    'Fixed a black screen on iPhone in 3D view',
-    'Fixed 3D view being shrunk on tall phone screens',
-    'Low light and poor tracking warnings',
-    'Error codes with plain-English meanings, viewable in Settings',
-    'Mobile layout fixes across iPhone, iPad, and desktop',
-    'The box no longer disappears instantly when one hand briefly leaves frame — it holds for about a second before clearing',
-    'A hand no longer drops out just because one unrelated finger (like the pinky) is off-frame or occluded — thumb and index are what actually matter',
-    'Fixed the box occasionally snapping to a wrong shape when a corner rotated past a certain angle',
-    'Smoothing now feels the same on every device instead of varying with frame rate',
-    'Crossing your hands no longer swaps their colors or reorders the box corners',
-    'Depth and tilt readings are smoothed properly, so shading no longer flickers on a steady box',
+  { version: 2, season: 'Summer 2026 \u00B7 Gestures update', date: '2026-08-14', items: [
     'Gesture commands: pinch one hand and hold to cycle effects, pinch both hands together and hold to reset',
+    'Radial wheel: pinch one hand while the other stays open, point with the open hand to aim, then blink and hold to pick',
+    'The wheel lists all of its controls on screen, and announces itself when it opens',
+    'Gesture sounds, plus haptics on Android (iOS Safari has no web vibration support, so sound only there)',
+    'The box hides while you gesture so it doesn\u2019t compete with your hands, and comes back a moment after you finish',
+    'Three new effects: Portal (stark black and white with an orange sweep and chromatic streaks), Tracking data (dashed readout boxes, perspective lines, RGB glitch columns), and Slice shift (the framed area fractures into sheared strips with glowing seams)',
+    'Two new onboarding steps with animated hands showing how to open and use the wheel',
     'Fixed a phantom box corner appearing near your face when only one hand is up',
-    'Gesture pinches now need a longer, more deliberate hold before they fire',
-    'New gesture: pinch one hand while the other is open to bring up a radial wheel \u2014 point at an effect with your other hand and pinch to pick it directly',
-    'Wheel pointing is now much more sensitive \u2014 small wrist movements sweep further, no more needing to twist your hand all the way around',
-    'The box now hides the instant you start a gesture so it doesn\u2019t compete with what you\u2019re doing, and returns a couple seconds after you finish, with a small countdown',
-    'Gesture sounds and haptic feedback (haptics work on Android; iOS Safari doesn\u2019t support web vibration at all, so no feeling there, just sound)',
-    'Wheel pointing needs far less physical movement now \u2014 no more twisting your whole wrist to reach a wedge',
-    'The pause before the frame comes back after a gesture is now under half a second, down from nearly two',
-    'Wheel selections are now confirmed by blinking and holding your eyes closed briefly \u2014 no pinching involved',
-    'A clear notification now pops up the moment the wheel opens, since the frame disappearing at the same time was easy to miss',
-    'Three new effects: Portal (stark black and white with an orange sweep and chromatic streaks), Tracking data (dashed readout boxes, perspective lines, RGB glitch columns), and Slice shift (the framed area slides out of place with a glowing seam)',
-    'Fixed the wheel opening on the opposite side of the screen from your hand, and aiming being reversed left-to-right',
+    'Fixed the wheel opening on the opposite side of the screen from your hand, and aiming being reversed left to right',
     'Fixed the wheel, its instructions, the watermark and all on-screen labels rendering at half size on phones',
     'Fixed the Professional effect drawing its size readout backwards',
-    'The wheel now shows a full list of its controls instead of one small hint line',
-    'Two new onboarding steps with animated hands showing how to open and use the wheel',
     'Fixed the box never returning if you switched to 3D view mid-gesture',
     'Fixed a wheel pick being confirmable with your eyes open if your face left frame mid-blink',
     'Fixed recordings piling up in memory \u2014 each clip\u2019s data is now released when the next one finishes',
   ]},
+  { version: 1, season: 'Summer 2026', date: '2026-08-13', items: [
+    'Recording now includes microphone audio, with a toggle to mute it',
+    '60 second recording limit, with a warning in the final 5 seconds',
+    'Five new effects: Glow pulse, Particles, Scanline, Bouncy (real spring physics with squash and stretch), and Professional (technical/CAD-style frame with corner ticks and live dimensions)',
+    '3D twist now tracks your hands\u2019 real rotation and actually tangles the box',
+    'Low light and poor tracking warnings',
+    'Error codes with plain-English meanings, viewable in Settings',
+    'Fixed a black screen on iPhone in 3D view, and 3D view being shrunk on tall phone screens',
+    'Mobile layout fixes across iPhone, iPad, and desktop',
+    'The box no longer disappears instantly when one hand briefly leaves frame',
+    'A hand no longer drops out just because one unrelated finger (like the pinky) is off-frame or occluded',
+    'Fixed the box occasionally snapping to a wrong shape when a corner rotated past a certain angle',
+    'Smoothing now feels the same on every device instead of varying with frame rate',
+    'Crossing your hands no longer swaps their colors or reorders the box corners',
+    'Depth and tilt readings are smoothed properly, so shading no longer flickers on a steady box',
+  ]},
 ];
-const CURRENT_VERSION = CHANGELOG[0].version;
+// Max rather than CHANGELOG[0], so adding an entry out of order can't silently
+// lower the current version and suppress the What's New card for everyone.
+const CURRENT_VERSION = Math.max(...CHANGELOG.map(e => e.version));
 
 const DEFAULTS = {
   viewMode: 'camera', // 'camera' | '3d'
@@ -1927,10 +1922,18 @@ function updateGesturesInner(hands, handedness) {
   const now = performance.now();
 
   const present = {};
+  const labelSeen = {};
   for (let i = 0; i < hands.length; i++) {
     const label = handedness[i]?.[0]?.categoryName;
     if (!label) continue;
-    present[label] = { hand: hands[i], pinched: pinchAmount(hands[i]) < PINCH_RATIO };
+    // MediaPipe sometimes assigns both hands the same label (occlusion, odd
+    // angles). Keying purely by label meant the second hand overwrote the
+    // first and silently vanished from the gesture system — no wheel aiming,
+    // no two-hand reset. Suffix duplicates instead. orderHands already sorts
+    // same-label hands by x, so these keys stay stable frame to frame.
+    const n = labelSeen[label] = (labelSeen[label] || 0) + 1;
+    const key = n === 1 ? label : `${label}#${n}`;
+    present[key] = { hand: hands[i], pinched: pinchAmount(hands[i]) < PINCH_RATIO };
   }
 
   if (wheelState) { updateWheel(present, now); return; }
@@ -2680,6 +2683,12 @@ function drawTrackingEffect(poly) {
 // Reference look: the framed region is displaced sideways from reality, with a
 // red-tinted offset copy and a bright seam along the cut. Re-samples the
 // already-drawn canvas, so it runs entirely in screen space.
+const SLICE_BAND_COUNT = 5;
+const SLICE_BAND_TINTS = [null, '#FFD400', null, '#141414', '#FF3320']; // null = untinted video, just re-sampled and sheared
+
+// Reference look: not one displaced block, but several separate strips — each
+// sheared its own amount, most left as plain re-sampled video, a couple tinted
+// (yellow, dark, red) as accents — with a bright glowing seam between each.
 function drawSliceEffect(poly) {
   const sPoly = poly.map(toScreen);
   const xs = sPoly.map(p => p.x), ys = sPoly.map(p => p.y);
@@ -2689,41 +2698,56 @@ function drawSliceEffect(poly) {
   if (w < 4 || h < 4) return;
 
   const t = performance.now();
-  const shift = w * 0.30 * Math.sin(t / 1500); // displacement scales with box size, so it reads the same near or far
+  const n = SLICE_BAND_COUNT;
+  const bandH = h / n;
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   tracePath(ctx, sPoly);
   ctx.clip();
 
-  // Pull the framed region from the canvas and redraw it offset. Reading and
-  // writing the same canvas is fine — the source is snapshotted first.
-  const sx = Math.max(0, Math.min(canvas.width - 1, left - shift));
-  const sw = Math.max(1, Math.min(canvas.width - sx, w));
-  ctx.drawImage(canvas, sx, top, sw, h, left, top, w, h);
+  for (let i = 0; i < n; i++) {
+    const by = top + i * bandH;
+    // Bands shear apart from the centre band, plus a shared animated wobble —
+    // reads as "fractured into strips" rather than "one block sliding."
+    const centerOffset = i - (n - 1) / 2;
+    const shift = w * 0.16 * centerOffset + w * 0.08 * Math.sin(t / 1400 + i * 0.9);
 
-  ctx.globalCompositeOperation = 'multiply';
-  ctx.fillStyle = 'rgba(255,70,60,0.55)';
-  ctx.fillRect(left, top, w, h);
-  ctx.globalCompositeOperation = 'source-over';
+    const sx = Math.max(0, Math.min(canvas.width - 1, left - shift));
+    const sw = Math.max(1, Math.min(canvas.width - sx, w));
+    ctx.drawImage(canvas, sx, by, sw, bandH + 1, left, by, w, bandH + 1);
+
+    const tint = SLICE_BAND_TINTS[i % SLICE_BAND_TINTS.length];
+    if (tint) {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = tint;
+      ctx.globalAlpha = 0.6;
+      ctx.fillRect(left, by, w, bandH + 1);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
   ctx.restore();
 
-  // Bright seams along the top and bottom of the displaced slab.
+  // Bright glowing seam at every band boundary, alternating white/yellow.
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.strokeStyle = '#FFD400';
-  ctx.lineWidth = 3;
-  ctx.shadowColor = '#FFD400';
-  ctx.shadowBlur = 8;
-  ctx.beginPath();
-  ctx.moveTo(left, top); ctx.lineTo(right, top);
-  ctx.moveTo(left, bottom); ctx.lineTo(right, bottom);
-  ctx.stroke();
+  ctx.lineWidth = 2.5 * uiScale;
+  ctx.shadowBlur = 7 * uiScale;
+  for (let i = 0; i <= n; i++) {
+    const sy = top + i * bandH;
+    ctx.strokeStyle = i % 2 === 0 ? '#FFD400' : '#FFFFFF';
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.moveTo(left, sy);
+    ctx.lineTo(right, sy);
+    ctx.stroke();
+  }
   ctx.restore();
 
   tracePath(ctx, poly);
   ctx.strokeStyle = hexToRgba(settings.frameColor, 0.6);
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 1.5 * uiScale;
   ctx.stroke();
 }
 
@@ -3188,7 +3212,7 @@ function maybeShowWhatsNew() {
   try { seen = parseInt(localStorage.getItem('handmesh_seen_version') || '0', 10); } catch (e) { return; }
   if (seen >= CURRENT_VERSION) return;
 
-  const newEntries = CHANGELOG.filter(e => e.version > seen);
+  const newEntries = CHANGELOG.filter(e => e.version > seen).sort((a, b) => b.version - a.version);
   if (!newEntries.length) return;
 
   const listEl = document.getElementById('whatsNewList');
